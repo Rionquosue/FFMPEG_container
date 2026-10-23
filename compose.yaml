@@ -17,7 +17,11 @@ services:
     tmpfs:
       - /work:rw,noexec,nosuid,nodev,size=1073741824,uid=10001,gid=10001,mode=0700
     environment:
-      HTTP_ADDR: ":8080"
+      HTTP_ADDR: ":8080"            # "off" to serve only on UNIX_SOCKET
+      # Extra allowed clients beyond loopback and this container's Docker
+      # networks, e.g. "10.8.0.5,192.168.50.0/24". Empty allows none.
+      WHITELIST_IPS: "${WHITELIST_IPS:-}"
+      # UNIX_SOCKET: /run/ffmpeg-api/api.sock   # also mount a shared volume there
       WORK_DIR: /work
       API_KEYS_FILE: /run/secrets/api_keys
       MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-268435456}"

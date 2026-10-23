@@ -10,7 +10,7 @@ The C helper is not setuid and needs no elevated capabilities. Landlock restrict
 
 The child's seccomp filter denies socket creation, ptrace, process_vm operations, cross-process signals, pidfd access, namespace changes, mount operations, permission changes, io_uring and process creation except thread clones. clone3 deliberately returns ENOSYS to permit compatible libc thread fallback.
 
-The API entrypoint permits only Internet-family stream sockets, rejects connect and datagram/sendmsg paths, and denies io_uring. The API can accept incoming HTTP and write responses, but cannot initiate outgoing connections even to a peer or Docker host. Startup checks that the connect denial is active. Child filters are additional restrictions inherited from the entrypoint.
+The API entrypoint permits only stream sockets (Internet-family TCP, and AF_UNIX for the optional `UNIX_SOCKET` listener), rejects connect and datagram/sendmsg paths for all of them, and denies netlink and io_uring. The API can accept incoming HTTP and write responses, but cannot initiate outgoing connections even to a peer or Docker host. Startup checks that the connect denial is active. Child filters are additional restrictions inherited from the entrypoint.
 
 A dedicated internal bridge is still required. An internal bridge alone does not isolate its peers or the host. Avoid unrelated peers, and keep the worker from exposing a proxy or forwarding packets. Optional host firewalls provide an additional boundary; the container does not manage them or require NET_ADMIN.
 
@@ -38,3 +38,8 @@ media-sandbox --check-egress
 Run the native container suite on amd64 and arm64, including normal media processing, and review the resulting vulnerability scan/SBOM. Verify no published ports and no writable filesystem outside tmpfs. Before accepting untrusted public uploads, add independent security review, load testing and an adversarial decoder corpus appropriate to your deployment.
 
 Report suspected vulnerabilities privately to the repository owner. Do not include secrets or private media in public issues.
+
+
+## Client access policy
+
+TCP clients are limited to loopback, the private subnets the container is directly attached to (its Docker networks) and `WHITELIST_IPS`; other peers are closed at accept, before any HTTP is parsed. This is defense in depth next to the internal Docker network and bearer keys, not a replacement for them. Its limits: Docker's userland proxy rewrites the source of published ports to the gateway address, so publish only on `127.0.0.1`; and `network_mode: host` makes the host's LAN look attached, so it is not supported. The optional Unix socket is mode 0660; access to it is decided by the volume and group it is shared through.

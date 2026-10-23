@@ -46,7 +46,8 @@ static void install(const struct sock_filter *code,size_t count) {
 }
 
 /* Whole API may listen/respond but cannot initiate connections or send datagrams.
-   Only INET TCP sockets are available. Inherited by every child. */
+   Only stream sockets (INET/INET6 TCP and AF_UNIX for UNIX_SOCKET) can be
+   created, and connect is denied for all of them. Inherited by every child. */
 static void api_filter(void) {
  struct sock_filter f[]={
  BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
@@ -57,10 +58,11 @@ static void api_filter(void) {
  #endif
  DENY(SYS_connect),DENY(SYS_sendto),DENY(SYS_sendmsg),DENY(SYS_sendmmsg),DENY(SYS_socketpair),
  DENY(SYS_io_uring_setup),DENY(SYS_io_uring_enter),DENY(SYS_io_uring_register),
- BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,0,8),
+ BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_socket,0,9),
  BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
- BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AF_INET,2,0),
- BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AF_INET6,1,0),
+ BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AF_INET,3,0),
+ BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AF_INET6,2,0),
+ BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AF_UNIX,1,0),
  BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
  BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[1])),
  BPF_STMT(BPF_ALU|BPF_AND|BPF_K,0xf),
@@ -121,6 +123,11 @@ static void confine(const char *dir,rlim_t max_file,rlim_t cpu) {
  uint64_t read=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR;
  rule(ruleset,"/usr/lib",read,0);rule(ruleset,"/lib",read,0);
  rule(ruleset,"/lib64",read,1);rule(ruleset,"/etc/ld.so.cache",LANDLOCK_ACCESS_FS_READ_FILE,1);
+ /* execve also opens the ELF interpreter for execution, so the dynamic
+    loader itself (and only it) needs EXECUTE; libraries are only mapped. */
+ uint64_t exec=LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_EXECUTE;
+ rule(ruleset,"/lib/ld-musl-x86_64.so.1",exec,1);rule(ruleset,"/lib/ld-musl-aarch64.so.1",exec,1);
+ rule(ruleset,"/lib64/ld-linux-x86-64.so.2",exec,1);rule(ruleset,"/lib/ld-linux-aarch64.so.1",exec,1);
  rule(ruleset,"/usr/bin/ffmpeg",LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_EXECUTE,0);
  rule(ruleset,"/usr/bin/ffprobe",LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_EXECUTE,0);
  char path[4096];
@@ -143,7 +150,11 @@ int main(int argc,char **argv) {
   if(connect(fd,NULL,0)!=-1||errno!=EPERM)die("egress test");
   close(fd);
   if(socket(AF_INET,SOCK_DGRAM,0)!=-1||errno!=EPERM)die("datagram test");
-  if(socket(AF_UNIX,SOCK_STREAM,0)!=-1||errno!=EPERM)die("unix socket test");
+  fd=socket(AF_UNIX,SOCK_STREAM,0);if(fd<0)die("unix stream socket");
+  if(connect(fd,NULL,0)!=-1||errno!=EPERM)die("unix egress test");
+  close(fd);
+  if(socket(AF_UNIX,SOCK_DGRAM,0)!=-1||errno!=EPERM)die("unix datagram test");
+  if(socket(AF_NETLINK,SOCK_RAW,0)!=-1||errno!=EPERM)die("netlink test");
   puts("egress denied");return 0;
  }
  if(argc==3&&!strcmp(argv[1],"--serve")) {

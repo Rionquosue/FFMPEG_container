@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -87,16 +88,7 @@ func startup(c service.Config) error {
 }
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
-		client := http.Client{Timeout: 2 * time.Second}
-		r, e := client.Get("http://127.0.0.1:8080/health/ready")
-		if e != nil {
-			os.Exit(1)
-		}
-		r.Body.Close()
-		if r.StatusCode != 200 {
-			os.Exit(1)
-		}
-		return
+		os.Exit(healthcheck())
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	c, e := service.FromEnv()
@@ -132,11 +124,92 @@ func main() {
 		s.Close()
 		close(done)
 	}()
-	log.Info("listening", "address", c.Addr)
-	if e = server.ListenAndServe(); e != nil && !errors.Is(e, http.ErrServerClosed) {
-		log.Error("HTTP server failed")
+	listeners, e := listen(c, log)
+	if e != nil {
+		log.Error("listen failed", "reason", e.Error())
 		s.Close()
 		os.Exit(1)
 	}
-	<-done
+	failed := make(chan error, len(listeners))
+	for _, l := range listeners {
+		log.Info("listening", "address", l.Addr().String())
+		go func(l net.Listener) {
+			if e := server.Serve(l); e != nil && !errors.Is(e, http.ErrServerClosed) {
+				failed <- e
+			}
+		}(l)
+	}
+	select {
+	case <-failed:
+		log.Error("HTTP server failed")
+		s.Close()
+		os.Exit(1)
+	case <-done:
+	}
+}
+
+// listen opens the TCP listener (restricted to loopback, attached Docker
+// networks and WHITELIST_IPS) and the optional Unix socket.
+func listen(c service.Config, log *slog.Logger) ([]net.Listener, error) {
+	var out []net.Listener
+	if c.Addr != "off" {
+		l, e := net.Listen("tcp", c.Addr)
+		if e != nil {
+			return nil, e
+		}
+		policy := service.NewAccessPolicy(c.Whitelist)
+		out = append(out, &service.FilteredListener{Listener: l, Allow: policy.Allowed, Log: log})
+	}
+	if c.UnixSocket != "" {
+		if info, e := os.Lstat(c.UnixSocket); e == nil {
+			if info.Mode()&os.ModeSocket == 0 {
+				return nil, errors.New("UNIX_SOCKET path exists and is not a socket")
+			}
+			_ = os.Remove(c.UnixSocket) // stale socket from a previous run
+		}
+		l, e := net.Listen("unix", c.UnixSocket)
+		if e != nil {
+			return nil, e
+		}
+		// Owner and group only: share the socket with the client container
+		// through a volume and a common group.
+		if e = os.Chmod(c.UnixSocket, 0660); e != nil {
+			return nil, e
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
+// healthcheck queries readiness over whichever listener is configured.
+func healthcheck() int {
+	addr := os.Getenv("HTTP_ADDR")
+	socket := os.Getenv("UNIX_SOCKET")
+	transport := &http.Transport{}
+	url := ""
+	switch {
+	case addr != "off":
+		_, port, e := net.SplitHostPort(addr)
+		if addr == "" || e != nil || port == "" {
+			port = "8080"
+		}
+		url = "http://127.0.0.1:" + port + "/health/ready"
+	case socket != "":
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}
+		url = "http://unix/health/ready"
+	default:
+		return 1
+	}
+	client := http.Client{Timeout: 2 * time.Second, Transport: transport}
+	r, e := client.Get(url)
+	if e != nil {
+		return 1
+	}
+	r.Body.Close()
+	if r.StatusCode != 200 {
+		return 1
+	}
+	return 0
 }

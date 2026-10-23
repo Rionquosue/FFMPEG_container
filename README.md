@@ -28,6 +28,24 @@ Create the network only if it does not already exist; verify an existing network
 
 Attach the Rails worker or another authorized application to `media_processing`. It reaches `http://ffmpeg:8080`. The service publishes **no host ports**. The image's Docker healthcheck calls the private readiness endpoint.
 
+### Who can connect
+
+The API only serves:
+
+| Source | How |
+|---|---|
+| Docker networks | Peers on the private subnets the container is directly attached to (read from the kernel routing table every 10 seconds, so `docker network connect` takes effect) |
+| Localhost | Loopback inside the container (the healthcheck). From the host machine, publish the port on loopback only: `ports: ["127.0.0.1:8080:8080"]`; Docker's proxy then connects from the network gateway, which is on an attached subnet. Docker does not publish ports for `--internal` networks, so this needs an additional non-internal network |
+| Unix socket | Set `UNIX_SOCKET=/run/ffmpeg-api/api.sock` and mount that directory as a volume shared with the client container. The socket is mode 0660, so share a group with the client. Set `HTTP_ADDR=off` to serve only on the socket |
+| Whitelisted IPs | `WHITELIST_IPS`: comma-separated addresses or CIDR ranges, for example `WHITELIST_IPS=10.8.0.5,192.168.50.0/24`. Use this for a client that is not on a shared Docker network, such as one reached over a VPN |
+
+Connections from anywhere else are closed before any HTTP is read and logged as `connection refused by access policy`. Public routes are never treated as Docker networks; IPv6 networks count only when they use unique-local (`fd00::/8`) addresses, otherwise whitelist them.
+
+Two deployment rules keep this meaningful:
+
+- Do not publish the port on all interfaces (`8080:8080` or `0.0.0.0:8080:8080`). With Docker's userland proxy, LAN clients would then arrive from the gateway address and look local.
+- Do not use `network_mode: host`. The host's own LAN subnets would count as attached networks.
+
 API keys are read once at startup. The file format is:
 
 ```json
@@ -258,7 +276,7 @@ The registry and idempotency keys are ephemeral. After restart, clients receive 
 | JOB_TTL_SECONDS | 900 |
 | TOMBSTONE_TTL_SECONDS | 900 |
 
-Other variables: HTTP_ADDR (default :8080), WORK_DIR (/work), API_KEYS_FILE (/run/secrets/api_keys), SANDBOX_PATH (/usr/local/bin/media-sandbox). Compose and the healthcheck use port 8080; keep that port unless also updating the healthcheck.
+Other variables: HTTP_ADDR (default :8080; `off` disables TCP), UNIX_SOCKET (optional socket path, absolute, at most 100 bytes), WHITELIST_IPS (extra allowed client addresses and CIDR ranges, at most 256), WORK_DIR (/work), API_KEYS_FILE (/run/secrets/api_keys), SANDBOX_PATH (/usr/local/bin/media-sandbox). The healthcheck follows HTTP_ADDR's port, or uses UNIX_SOCKET when TCP is off.
 
 Reserve declared input bytes plus the maximum possible output before accepting a job. Completed results count against capacity until deleted/expired. Global saturation returns 503; a per-consumer limit returns 429. Both include Retry-After.
 

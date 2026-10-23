@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +12,12 @@ import (
 )
 
 type Config struct {
-	Addr, WorkDir, KeysFile, Sandbox                 string
+	Addr, WorkDir, KeysFile, Sandbox string
+	// UnixSocket, when set, also serves the API on this socket path (for
+	// a volume shared with the client container). Addr "off" disables TCP.
+	UnixSocket string
+	// Whitelist adds TCP peers beyond loopback and attached Docker networks.
+	Whitelist                                        []netip.Prefix
 	MaxUpload, MaxOutput, StorageBudget, MaxPixels   int64
 	MaxDuration                                      float64
 	Concurrent, Retained, PerConsumer, MaxRecords    int
@@ -27,7 +33,14 @@ func DefaultConfig() Config {
 
 func FromEnv() (Config, error) {
 	c := DefaultConfig()
-	for k, p := range map[string]*string{"HTTP_ADDR": &c.Addr, "WORK_DIR": &c.WorkDir, "API_KEYS_FILE": &c.KeysFile, "SANDBOX_PATH": &c.Sandbox} {
+	if v := os.Getenv("WHITELIST_IPS"); v != "" {
+		list, e := ParseWhitelist(v)
+		if e != nil {
+			return c, e
+		}
+		c.Whitelist = list
+	}
+	for k, p := range map[string]*string{"HTTP_ADDR": &c.Addr, "WORK_DIR": &c.WorkDir, "API_KEYS_FILE": &c.KeysFile, "SANDBOX_PATH": &c.Sandbox, "UNIX_SOCKET": &c.UnixSocket} {
 		if v := os.Getenv(k); v != "" {
 			*p = v
 		}
@@ -81,6 +94,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxPixels < 256 || c.MaxPixels > 67108864 || c.MaxDuration < 1 || c.MaxDuration > 86400 {
 		return errors.New("invalid media limits")
+	}
+	if c.Addr == "off" && c.UnixSocket == "" {
+		return errors.New("HTTP_ADDR=off requires UNIX_SOCKET")
+	}
+	if c.UnixSocket != "" && (!filepath.IsAbs(c.UnixSocket) || len(c.UnixSocket) > 100) {
+		return errors.New("UNIX_SOCKET must be an absolute path of at most 100 bytes")
 	}
 	if c.ProcessTimeout <= 0 || c.UploadTimeout <= 0 || c.TTL <= 0 || c.TombstoneTTL <= 0 {
 		return errors.New("invalid time limits")
