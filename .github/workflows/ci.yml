@@ -15,21 +15,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.3"
-          cache: false
-      - name: Install fixture tools
-        timeout-minutes: 10
-        run: |
-          for attempt in 1 2 3; do
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update &&
-              sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg && exit 0
-            sleep $((attempt * 15))
-          done
-          exit 1
+      # Tests run in the same pinned Go/Alpine base as the image build, with
+      # Alpine's FFmpeg, so they do not depend on the runner's apt mirror.
       - name: Unit, race and real-media tests
-        run: make test
+        timeout-minutes: 15
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c \
+            sh -c 'apk add --no-cache build-base ffmpeg >/dev/null && go vet ./... && CGO_ENABLED=1 go test -race -count=1 ./...'
       - name: Validate API contract
         run: |
           python3 -m venv /tmp/contract-check

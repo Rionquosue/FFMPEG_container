@@ -6,8 +6,7 @@ suffix="$$"
 network="ffmpeg-smoke-$suffix"
 container="ffmpeg-smoke-$suffix"
 scratch="$(mktemp -d)"
-# The capability-dropped client container must be able to enter it.
-chmod 755 "$scratch"
+chmod 777 "$scratch" # fixtures are written by the image user (10001) and read by the client
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
@@ -22,11 +21,12 @@ p.write_text(json.dumps({"consumers":[{"id":"test","keys":[secrets.token_urlsafe
                                       {"id":"other","keys":[secrets.token_urlsafe(32)]}]}))
 p.chmod(0o644)
 PY
-ffmpeg -v error -y -f lavfi -i color=c=blue:s=64x64:r=10 -f lavfi -i sine=frequency=440 \
-  -t 1 -threads 1 -filter_threads 1 -c:v libx264 -pix_fmt yuv420p -c:a aac "$scratch/input.mp4"
-ffmpeg -v error -y -f lavfi -i color=c=black:s=16x16:r=1 -t 7200 -threads 1 -c:v libx264 -preset ultrafast \
-  -pix_fmt yuv420p "$scratch/long.mp4"
-docker pull python:3.12-alpine >/dev/null
+docker run --rm -v "$scratch:/out" --entrypoint ffmpeg "$image" -v error -y -f lavfi -i color=c=blue:s=64x64:r=10 -f lavfi -i sine=frequency=440 \
+  -t 1 -threads 1 -filter_threads 1 -c:v libx264 -pix_fmt yuv420p -c:a aac /out/input.mp4
+docker run --rm -v "$scratch:/out" --entrypoint ffmpeg "$image" -v error -y -f lavfi -i color=c=black:s=16x16:r=1 -t 7200 -threads 1 -c:v libx264 -preset ultrafast \
+  -pix_fmt yuv420p /out/long.mp4
+# A cached copy is fine when the registry rate-limits the pull.
+docker pull python:3.12-alpine >/dev/null || docker image inspect python:3.12-alpine >/dev/null
 docker network create --internal "$network" >/dev/null
 docker run -d --name "$container" --network "$network" --network-alias ffmpeg \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 \
