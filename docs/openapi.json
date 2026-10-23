@@ -1,0 +1,1399 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FFmpeg service API",
+    "version": "0.1.0",
+    "description": "Private authenticated media service. Output survives GET until DELETE or expiry. Registry and idempotency state are ephemeral. No browser CORS or API keys in URLs."
+  },
+  "servers": [
+    {
+      "url": "http://ffmpeg:8080"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "live",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "ready",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Installed capabilities and configured limits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "post": {
+        "operationId": "createJob",
+        "description": "Send request part first (application/json, at most 16 KiB), then exactly one file. Declared size/hash verified before acceptance. Maximum bytes and geometry are deployment-specific; read capabilities. Retry uses same key and same canonical request.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[!-~]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request": {
+                    "$ref": "#/components/schemas/Request"
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                },
+                "required": [
+                  "request",
+                  "file"
+                ],
+                "additionalProperties": false
+              },
+              "encoding": {
+                "request": {
+                  "contentType": "application/json"
+                },
+                "file": {
+                  "contentType": "application/octet-stream"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Job accepted or existing matching job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Status URL"
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed upload, invalid key, checksum or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or wrong owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "Unsupported representation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or unavailable result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Deleted or expired job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Input too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid operation parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Consumer limit; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Sanitized internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Accept",
+            "schema": {
+              "type": "string",
+              "default": "application/json"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state, including failed processing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Unchanged"
+          },
+          "400": {
+            "description": "Malformed upload, invalid key, checksum or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or wrong owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "Unsupported representation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or unavailable result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Deleted or expired job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Input too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid operation parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Consumer limit; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Sanitized internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteJob",
+        "responses": {
+          "202": {
+            "description": "Cancellation or cleanup in progress; poll or repeat DELETE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Deleted; idempotent while tombstone retained"
+          },
+          "400": {
+            "description": "Malformed upload, invalid key, checksum or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or wrong owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "Unsupported representation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or unavailable result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Deleted or expired job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Input too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid operation parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Consumer limit; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Sanitized internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/download": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "download",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "type": "string"
+            },
+            "description": "One byte range only"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified result. GET does not delete output.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial result",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Invalid or multiple ranges",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed upload, invalid key, checksum or body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job or wrong owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "406": {
+            "description": "Unsupported representation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict or unavailable result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Deleted or expired job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Input too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid operation parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Consumer limit; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Capacity or readiness failure; Retry-After",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Sanitized internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Input": {
+        "type": "object",
+        "properties": {
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1099511627776
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          }
+        },
+        "required": [
+          "size_bytes",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
+      "TranscodeRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "transcode"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2
+              },
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "contain",
+                  "cover"
+                ],
+                "default": "contain"
+              },
+              "quality": {
+                "type": "integer",
+                "minimum": 18,
+                "maximum": 35
+              },
+              "audio_bitrate_kbps": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 320
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "dependentRequired": {
+              "width": [
+                "height"
+              ],
+              "height": [
+                "width"
+              ]
+            }
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "mp4",
+              "webm"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "ResizeRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "resize"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096
+              },
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "contain",
+                  "cover"
+                ],
+                "default": "contain"
+              }
+            },
+            "required": [
+              "width",
+              "height"
+            ],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "jpg",
+              "png"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "ThumbnailRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "thumbnail"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "width": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096
+              },
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "contain",
+                  "cover"
+                ],
+                "default": "contain"
+              },
+              "timestamp_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              }
+            },
+            "required": [
+              "width",
+              "height",
+              "timestamp_seconds"
+            ],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "jpg",
+              "png"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "ExtractAudioRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "extract_audio"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "audio_bitrate_kbps": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 320
+              },
+              "channels": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "m4a",
+              "mp3",
+              "opus"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "TrimRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "trim"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "start_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              },
+              "duration_seconds": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 86400
+              },
+              "quality": {
+                "type": "integer",
+                "minimum": 18,
+                "maximum": 35
+              }
+            },
+            "required": [
+              "start_seconds",
+              "duration_seconds"
+            ],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "mp4",
+              "webm"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "RemuxRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "remux"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "mp4",
+              "webm"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "MetadataRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "const": "metadata"
+          },
+          "input": {
+            "$ref": "#/components/schemas/Input"
+          },
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "output_format": {
+            "type": "string",
+            "enum": [
+              "json"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "input",
+          "parameters",
+          "output_format"
+        ],
+        "additionalProperties": false
+      },
+      "Request": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TranscodeRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ResizeRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ThumbnailRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ExtractAudioRequest"
+          },
+          {
+            "$ref": "#/components/schemas/TrimRequest"
+          },
+          {
+            "$ref": "#/components/schemas/RemuxRequest"
+          },
+          {
+            "$ref": "#/components/schemas/MetadataRequest"
+          }
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Result": {
+        "type": "object",
+        "properties": {
+          "content_type": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1099511627776
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "content_type",
+          "size_bytes",
+          "sha256"
+        ],
+        "additionalProperties": false
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "1"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "completed",
+              "failed",
+              "cancelling",
+              "cancelled",
+              "deleting",
+              "deleted",
+              "expired"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_url": {
+            "type": "string"
+          },
+          "download_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Result"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Error"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "api_version",
+          "instance_id",
+          "job_id",
+          "status",
+          "created_at",
+          "completed_at",
+          "expires_at",
+          "status_url",
+          "download_url",
+          "result",
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": false
+      },
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "1"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "codecs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "api_version",
+          "instance_id",
+          "operations",
+          "codecs",
+          "limits"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -1,0 +1,56 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - name: Install fixture tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Unit, race and real-media tests
+        run: make test
+      - name: Validate API contract
+        run: |
+          python3 -m venv /tmp/contract-check
+          /tmp/contract-check/bin/pip install openapi-spec-validator==0.7.2
+          /tmp/contract-check/bin/python scripts/check-contract.py
+      - name: Build hardened container
+        run: docker build --pull -t ffmpeg-service:test .
+      - name: Container, API and confinement checks
+        run: sh scripts/container-smoke.sh ffmpeg-service:test
+      - name: Collect image manifest
+        run: |
+          mkdir -p dist
+          docker image inspect ffmpeg-service:test > dist/image-inspect.json
+          docker run --rm --entrypoint cat ffmpeg-service:test /usr/share/ffmpeg-service/packages.txt > dist/packages.txt
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ffmpeg-service:test
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ffmpeg-service:test
+          format: cyclonedx
+          output: dist/sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-evidence-${{ matrix.runner }}
+          path: dist/

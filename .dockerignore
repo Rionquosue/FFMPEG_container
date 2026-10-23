@@ -1,0 +1,7 @@
+.git
+.env
+secrets
+bin
+dist
+__pycache__
+*.zip
