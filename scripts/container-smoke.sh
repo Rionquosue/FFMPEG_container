@@ -6,6 +6,8 @@ suffix="$$"
 network="ffmpeg-smoke-$suffix"
 container="ffmpeg-smoke-$suffix"
 scratch="$(mktemp -d)"
+# The capability-dropped client container must be able to enter it.
+chmod 755 "$scratch"
 cleanup() {
   docker rm -f "$container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
