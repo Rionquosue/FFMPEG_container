@@ -21,8 +21,30 @@ type Request struct {
 }
 type Params struct {
 	Width, Height, Quality, Bitrate, Channels, JPEGQuality int
-	Fit                                                    string
+	MaxDimension, MaxFPS, MaxBitrate                       int
+	Fit, AudioMode                                         string
 	Timestamp, Start, Duration                             float64
+}
+
+// operationParameters lists the parameters each operation accepts. Validate
+// and the capabilities response both read it, so they cannot drift apart.
+var operationParameters = map[string]string{
+	"transcode":     "width height fit quality audio_bitrate_kbps audio_mode max_dimension max_fps max_bitrate_kbps",
+	"resize":        "width height fit jpeg_quality",
+	"thumbnail":     "timestamp_seconds width height fit jpeg_quality",
+	"extract_audio": "audio_bitrate_kbps channels",
+	"trim":          "start_seconds duration_seconds quality width height fit audio_bitrate_kbps audio_mode max_dimension max_fps max_bitrate_kbps",
+	"remux":         "audio_mode",
+	"metadata":      "",
+}
+
+// OperationParameters returns the accepted parameter names per operation.
+func OperationParameters() map[string][]string {
+	out := map[string][]string{}
+	for op, names := range operationParameters {
+		out[op] = append([]string{}, splitFields(names)...)
+	}
+	return out
 }
 
 func decodeStrict(r io.Reader, v any, max int64) error {
@@ -92,7 +114,7 @@ func invalid(code, field, message string) *APIError {
 // Validate checks the request part before any file bytes are read. Errors
 // carry the contract's code and the offending field.
 func (r Request) Validate(c Config) (Params, *APIError) {
-	p := Params{Quality: 23, Bitrate: 128, Channels: 2, Fit: "contain", JPEGQuality: 85}
+	p := Params{Quality: 23, Bitrate: 128, Channels: 2, Fit: "contain", JPEGQuality: 85, AudioMode: "preserve"}
 	hash, e := hex.DecodeString(r.Input.SHA256)
 	if e != nil || len(hash) != 32 {
 		return p, invalid("invalid_parameter", "input.sha256", "SHA-256 must be 64 hexadecimal characters.")
@@ -100,13 +122,7 @@ func (r Request) Validate(c Config) (Params, *APIError) {
 	if r.Input.Size < 1 || r.Input.Size > c.MaxUpload {
 		return p, invalid("invalid_parameter", "input.size_bytes", "Input size must be between 1 byte and the advertised maximum.")
 	}
-	fields := map[string]string{
-		"transcode": "width height fit quality audio_bitrate_kbps",
-		"resize":    "width height fit jpeg_quality", "thumbnail": "timestamp_seconds width height fit jpeg_quality",
-		"extract_audio": "audio_bitrate_kbps channels", "trim": "start_seconds duration_seconds quality",
-		"remux": "", "metadata": "",
-	}
-	allowed, ok := fields[r.Operation]
+	allowed, ok := operationParameters[r.Operation]
 	if !ok {
 		return p, invalid("unsupported_operation", "operation", "Unknown operation.")
 	}
@@ -151,6 +167,14 @@ func (r Request) Validate(c Config) (Params, *APIError) {
 			dest = &p.Start
 		case "duration_seconds":
 			dest = &p.Duration
+		case "audio_mode":
+			dest = &p.AudioMode
+		case "max_dimension":
+			dest = &p.MaxDimension
+		case "max_fps":
+			dest = &p.MaxFPS
+		case "max_bitrate_kbps":
+			dest = &p.MaxBitrate
 		}
 		if json.Unmarshal(v, dest) != nil {
 			return p, invalid("invalid_parameter", field, "Parameter has the wrong type.")
@@ -167,12 +191,31 @@ func (r Request) Validate(c Config) (Params, *APIError) {
 		return p, invalid("invalid_parameter", "parameters.fit", "Fit must be contain or cover.")
 	case p.JPEGQuality < 50 || p.JPEGQuality > 95:
 		return p, invalid("invalid_parameter", "parameters.jpeg_quality", "JPEG quality must be an integer between 50 and 95.")
+	case !contains([]string{"preserve", "remove"}, p.AudioMode):
+		return p, invalid("invalid_parameter", "parameters.audio_mode", "Audio mode must be preserve or remove.")
+	}
+	if _, ok := r.Parameters["max_dimension"]; ok && (p.MaxDimension < 16 || p.MaxDimension > 4096 || p.MaxDimension%2 != 0) {
+		return p, invalid("invalid_parameter", "parameters.max_dimension", "Maximum dimension must be an even integer between 16 and 4096.")
+	}
+	if _, ok := r.Parameters["max_fps"]; ok && (p.MaxFPS < 1 || p.MaxFPS > 60) {
+		return p, invalid("invalid_parameter", "parameters.max_fps", "Maximum frame rate must be an integer between 1 and 60.")
+	}
+	if _, ok := r.Parameters["max_bitrate_kbps"]; ok {
+		if p.MaxBitrate < 100 || p.MaxBitrate > 20000 {
+			return p, invalid("invalid_parameter", "parameters.max_bitrate_kbps", "Maximum bitrate must be an integer between 100 and 20000 kbps.")
+		}
+		if r.Format != "mp4" {
+			return p, invalid("invalid_parameter", "parameters.max_bitrate_kbps", "Maximum bitrate applies only to mp4 output.")
+		}
 	}
 	if _, ok := r.Parameters["jpeg_quality"]; ok && r.Format != "jpg" {
 		return p, invalid("invalid_parameter", "parameters.jpeg_quality", "JPEG quality applies only to jpg output.")
 	}
 	_, wset := r.Parameters["width"]
 	_, hset := r.Parameters["height"]
+	if _, ok := r.Parameters["max_dimension"]; ok && (wset || hset) {
+		return p, invalid("invalid_parameter", "parameters.max_dimension", "Maximum dimension cannot be combined with width and height.")
+	}
 	if wset != hset {
 		missing := "parameters.height"
 		if hset {
@@ -188,7 +231,7 @@ func (r Request) Validate(c Config) (Params, *APIError) {
 			name string
 			v    int
 		}{{"width", p.Width}, {"height", p.Height}} {
-			if d.v < 16 || d.v > 4096 || (r.Operation == "transcode" && d.v%2 != 0) {
+			if d.v < 16 || d.v > 4096 || ((r.Operation == "transcode" || r.Operation == "trim") && d.v%2 != 0) {
 				return p, invalid("invalid_parameter", "parameters."+d.name, "Dimensions must be integers between 16 and 4096, even for video.")
 			}
 		}

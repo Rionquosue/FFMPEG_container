@@ -14,4 +14,24 @@ example = {"operation": "metadata", "input": {"size_bytes": 3, "sha256": "a" * 6
 validator.validate(example)
 invalid = dict(example, parameters={"command": "anything"})
 assert not validator.is_valid(invalid), "Unknown parameters must be rejected"
+
+def video(operation, parameters, output_format="mp4"):
+    return {"operation": operation, "input": {"size_bytes": 3, "sha256": "a" * 64},
+            "parameters": parameters, "output_format": output_format}
+
+animation = {"audio_mode": "remove", "max_dimension": 640, "max_fps": 15, "quality": 28, "max_bitrate_kbps": 800}
+for valid in [video("transcode", animation), video("trim", dict(animation, start_seconds=3, duration_seconds=8)),
+              video("remux", {"audio_mode": "remove"}, "webm"), video("transcode", {"width": 640, "height": 360})]:
+    validator.validate(valid)
+for rejected, reason in [
+    (video("transcode", {"audio_mode": None}), "null parameter"),
+    (video("transcode", {"audio_mode": "mute"}), "unknown audio mode"),
+    (video("transcode", {"max_dimension": 641}), "odd maximum dimension"),
+    (video("transcode", {"max_fps": 61}), "frame rate above range"),
+    (video("transcode", {"max_dimension": 640, "width": 640, "height": 360}), "max_dimension with width/height"),
+    (video("transcode", {"max_bitrate_kbps": 800}, "webm"), "bitrate cap on webm"),
+    (video("trim", {"start_seconds": 0, "duration_seconds": 1, "width": 640}), "width without height"),
+    (video("remux", {"max_fps": 15}), "remux geometry"),
+]:
+    assert not validator.is_valid(rejected), f"Must reject: {reason}"
 print("OpenAPI 3.1 and request examples validated.")

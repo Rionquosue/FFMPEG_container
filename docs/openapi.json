@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "FFmpeg service API",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Private authenticated media service. Output survives GET until DELETE or expiry. Registry and idempotency state are ephemeral. No browser CORS or API keys in URLs."
   },
   "servers": [
@@ -851,6 +851,34 @@
                 "type": "integer",
                 "minimum": 64,
                 "maximum": 320
+              },
+              "audio_mode": {
+                "type": "string",
+                "enum": [
+                  "preserve",
+                  "remove"
+                ],
+                "default": "preserve",
+                "description": "remove drops every audio stream; the output is verified to contain none."
+              },
+              "max_dimension": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2,
+                "description": "Longest edge of the output after auto-rotation. Aspect ratio is kept, nothing is padded and the source is never upscaled. Cannot be combined with width and height."
+              },
+              "max_fps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60,
+                "description": "Frame-rate ceiling. Applied only when the source is faster; never raises the frame rate."
+              },
+              "max_bitrate_kbps": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 20000,
+                "description": "Capped CRF video bitrate (mp4 output only)."
               }
             },
             "required": [],
@@ -861,6 +889,22 @@
               ],
               "height": [
                 "width"
+              ]
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "max_dimension",
+                    "width"
+                  ]
+                },
+                {
+                  "required": [
+                    "max_dimension",
+                    "height"
+                  ]
+                }
               ]
             }
           },
@@ -878,7 +922,28 @@
           "parameters",
           "output_format"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "output_format": {
+              "const": "webm"
+            }
+          },
+          "required": [
+            "output_format"
+          ]
+        },
+        "then": {
+          "properties": {
+            "parameters": {
+              "not": {
+                "required": [
+                  "max_bitrate_kbps"
+                ]
+              }
+            }
+          }
+        }
       },
       "ResizeRequest": {
         "type": "object",
@@ -1079,13 +1144,90 @@
                 "type": "integer",
                 "minimum": 18,
                 "maximum": 35
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2
+              },
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "contain",
+                  "cover"
+                ],
+                "default": "contain"
+              },
+              "audio_bitrate_kbps": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 320
+              },
+              "audio_mode": {
+                "type": "string",
+                "enum": [
+                  "preserve",
+                  "remove"
+                ],
+                "default": "preserve",
+                "description": "remove drops every audio stream; the output is verified to contain none."
+              },
+              "max_dimension": {
+                "type": "integer",
+                "minimum": 16,
+                "maximum": 4096,
+                "multipleOf": 2,
+                "description": "Longest edge of the output after auto-rotation. Aspect ratio is kept, nothing is padded and the source is never upscaled. Cannot be combined with width and height."
+              },
+              "max_fps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60,
+                "description": "Frame-rate ceiling. Applied only when the source is faster; never raises the frame rate."
+              },
+              "max_bitrate_kbps": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 20000,
+                "description": "Capped CRF video bitrate (mp4 output only)."
               }
             },
             "required": [
               "start_seconds",
               "duration_seconds"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "dependentRequired": {
+              "width": [
+                "height"
+              ],
+              "height": [
+                "width"
+              ]
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "max_dimension",
+                    "width"
+                  ]
+                },
+                {
+                  "required": [
+                    "max_dimension",
+                    "height"
+                  ]
+                }
+              ]
+            }
           },
           "output_format": {
             "type": "string",
@@ -1101,7 +1243,28 @@
           "parameters",
           "output_format"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "output_format": {
+              "const": "webm"
+            }
+          },
+          "required": [
+            "output_format"
+          ]
+        },
+        "then": {
+          "properties": {
+            "parameters": {
+              "not": {
+                "required": [
+                  "max_bitrate_kbps"
+                ]
+              }
+            }
+          }
+        }
       },
       "RemuxRequest": {
         "type": "object",
@@ -1115,7 +1278,17 @@
           },
           "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+              "audio_mode": {
+                "type": "string",
+                "enum": [
+                  "preserve",
+                  "remove"
+                ],
+                "default": "preserve",
+                "description": "remove drops every audio stream; the output is verified to contain none."
+              }
+            },
             "required": [],
             "additionalProperties": false
           },
@@ -1395,6 +1568,17 @@
             "type": "object",
             "additionalProperties": {
               "type": "number"
+            },
+            "description": "Configured limits, including process_timeout_seconds and upload_timeout_seconds."
+          },
+          "parameters": {
+            "type": "object",
+            "description": "Accepted parameter names per operation.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         },

@@ -491,3 +491,91 @@ func TestConfigRejectsUnsafeBudgets(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestExtensionValidation(t *testing.T) {
+	c := DefaultConfig()
+	sha := request([]byte("abc")).Input.SHA256
+	body := func(op, params, format string) string {
+		return `{"operation":"` + op + `","input":{"size_bytes":3,"sha256":"` + sha + `"},"parameters":` + params + `,"output_format":"` + format + `"}`
+	}
+	cases := []struct{ input, field string }{
+		{body("transcode", `{"audio_mode":"mute"}`, "mp4"), "parameters.audio_mode"},
+		{body("transcode", `{"max_dimension":640,"width":640,"height":360}`, "mp4"), "parameters.max_dimension"},
+		{body("transcode", `{"max_dimension":641}`, "mp4"), "parameters.max_dimension"},
+		{body("transcode", `{"max_dimension":8}`, "mp4"), "parameters.max_dimension"},
+		{body("transcode", `{"max_fps":0}`, "mp4"), "parameters.max_fps"},
+		{body("transcode", `{"max_fps":61}`, "mp4"), "parameters.max_fps"},
+		{body("transcode", `{"max_fps":12.5}`, "mp4"), "parameters.max_fps"},
+		{body("transcode", `{"max_bitrate_kbps":50}`, "mp4"), "parameters.max_bitrate_kbps"},
+		{body("transcode", `{"max_bitrate_kbps":800}`, "webm"), "parameters.max_bitrate_kbps"},
+		{body("trim", `{"start_seconds":0,"duration_seconds":1,"width":33,"height":32}`, "mp4"), "parameters.width"},
+		{body("remux", `{"max_fps":15}`, "mp4"), "parameters.max_fps"},
+		{body("extract_audio", `{"audio_mode":"remove"}`, "m4a"), "parameters.audio_mode"},
+		{body("transcode", `{"audio_mode":null}`, "mp4"), "parameters.audio_mode"},
+	}
+	for _, tc := range cases {
+		var req Request
+		if e := decodeStrict(strings.NewReader(tc.input), &req, 16384); e != nil {
+			t.Fatal(e)
+		}
+		if _, verr := req.Validate(c); verr == nil || verr.Code != "invalid_parameter" || verr.Field != tc.field {
+			t.Fatalf("%s: got %+v", tc.input, verr)
+		}
+	}
+	var ok Request
+	_ = decodeStrict(strings.NewReader(body("trim", `{"start_seconds":1,"duration_seconds":2,"quality":28,"audio_mode":"remove","max_dimension":640,"max_fps":15,"max_bitrate_kbps":800}`, "mp4")), &ok, 16384)
+	if p, verr := ok.Validate(c); verr != nil || p.AudioMode != "remove" || p.MaxDimension != 640 || p.MaxFPS != 15 || p.MaxBitrate != 800 {
+		t.Fatal(verr, p)
+	}
+	var plain Request
+	_ = decodeStrict(strings.NewReader(body("remux", `{}`, "mp4")), &plain, 16384)
+	if p, verr := plain.Validate(c); verr != nil || p.AudioMode != "preserve" {
+		t.Fatal(verr, p)
+	}
+}
+
+func TestAudioModeDefaultKeepsFingerprint(t *testing.T) {
+	s := setup(t, fakeProcessor{})
+	data := []byte("abc")
+	r := request(data)
+	r.Operation, r.Format = "remux", "mp4"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, uploadRequest(t, r, data, "idempotency-000002"))
+	var first View
+	json.Unmarshal(w.Body.Bytes(), &first)
+	r.Parameters["audio_mode"] = json.RawMessage(`"preserve"`)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, uploadRequest(t, r, data, "idempotency-000002"))
+	var second View
+	json.Unmarshal(w.Body.Bytes(), &second)
+	if w.Code != 202 || first.ID == "" || first.ID != second.ID {
+		t.Fatal(w.Code, first.ID, second.ID)
+	}
+	r.Parameters["audio_mode"] = json.RawMessage(`"remove"`)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, uploadRequest(t, r, data, "idempotency-000002"))
+	if w.Code != 409 {
+		t.Fatal("changed audio mode must conflict", w.Code)
+	}
+}
+
+func TestCapabilitiesAdvertiseParameters(t *testing.T) {
+	s := setup(t, fakeProcessor{})
+	w := call(s, "GET", "/v1/capabilities", testKey)
+	var caps struct {
+		Parameters map[string][]string `json:"parameters"`
+		Limits     map[string]float64  `json:"limits"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &caps) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if !contains(caps.Parameters["transcode"], "audio_mode") || !contains(caps.Parameters["trim"], "max_bitrate_kbps") || !contains(caps.Parameters["remux"], "audio_mode") {
+		t.Fatal(caps.Parameters)
+	}
+	if m, ok := caps.Parameters["metadata"]; !ok || len(m) != 0 || !strings.Contains(w.Body.String(), `"metadata":[]`) {
+		t.Fatal("metadata must advertise an empty parameter list", w.Body.String())
+	}
+	if caps.Limits["process_timeout_seconds"] != 120 || caps.Limits["upload_timeout_seconds"] != 120 {
+		t.Fatal(caps.Limits)
+	}
+}

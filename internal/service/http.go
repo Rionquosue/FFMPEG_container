@@ -97,8 +97,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"api_version": "1", "instance_id": s.instance,
 			"operations": map[string][]string{"transcode": {"mp4", "webm"}, "resize": {"jpg", "png"}, "thumbnail": {"jpg", "png"}, "extract_audio": {"m4a", "mp3", "opus"}, "trim": {"mp4", "webm"}, "remux": {"mp4", "webm"}, "metadata": {"json"}},
+			"parameters": OperationParameters(),
 			"codecs":     map[string]string{"mp4": "h264/aac", "webm": "vp9/opus", "jpg": "mjpeg", "png": "png", "m4a": "aac", "mp3": "mp3", "opus": "opus"},
-			"limits":     map[string]any{"max_upload_bytes": s.cfg.MaxUpload, "max_output_bytes": s.cfg.MaxOutput, "max_duration_seconds": s.cfg.MaxDuration, "max_pixels": s.cfg.MaxPixels, "max_concurrent_jobs": s.cfg.Concurrent, "max_retained_jobs": s.cfg.Retained, "max_jobs_per_consumer": s.cfg.PerConsumer, "job_ttl_seconds": int(s.cfg.TTL.Seconds())}})
+			"limits":     map[string]any{"max_upload_bytes": s.cfg.MaxUpload, "max_output_bytes": s.cfg.MaxOutput, "max_duration_seconds": s.cfg.MaxDuration, "max_pixels": s.cfg.MaxPixels, "max_concurrent_jobs": s.cfg.Concurrent, "max_retained_jobs": s.cfg.Retained, "max_jobs_per_consumer": s.cfg.PerConsumer, "job_ttl_seconds": int(s.cfg.TTL.Seconds()), "process_timeout_seconds": int(s.cfg.ProcessTimeout.Seconds()), "upload_timeout_seconds": int(s.cfg.UploadTimeout.Seconds())}})
 	case "/v1/jobs":
 		if r.Method != "POST" {
 			fail(w, 405, "method_not_allowed")

@@ -30,6 +30,8 @@ for operation, output, parameters in [
     ("extract_audio", "mp3", {}),
     ("trim", "mp4", {"start_seconds": 0, "duration_seconds": 0.3}),
     ("remux", "mp4", {}),
+    ("transcode", "mp4", {"audio_mode": "remove", "max_dimension": 32, "max_fps": 5, "max_bitrate_kbps": 200}),
+    ("remux", "mp4", {"audio_mode": "remove"}),
 ]:
     boundary = uuid.uuid4().hex
     spec = {"operation": operation, "parameters": parameters, "output_format": output,
@@ -58,4 +60,7 @@ for operation, output, parameters in [
     assert request("GET", job["status_url"])[0] == 410
     print(operation, output, "passed")
 assert request("GET", "/v1/capabilities", extra={"Authorization": ""})[0] == 401
+code, _, raw = request("GET", "/v1/capabilities")
+caps = json.loads(raw)
+assert code == 200 and "audio_mode" in caps["parameters"]["transcode"] and caps["limits"]["process_timeout_seconds"] > 0, caps
 print("Container API and sandbox startup checks passed.")

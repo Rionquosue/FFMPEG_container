@@ -40,9 +40,14 @@ type probeData struct {
 		Width    int    `json:"width"`
 		Height   int    `json:"height"`
 		Channels int    `json:"channels"`
+		AvgRate  string `json:"avg_frame_rate"`
+		BaseRate string `json:"r_frame_rate"`
 		SideData []struct {
 			Rotation int `json:"rotation"`
 		} `json:"side_data_list"`
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
 	} `json:"streams"`
 	Format struct {
 		Name     string `json:"format_name"`
@@ -57,7 +62,23 @@ type metadata struct {
 	VideoCodec string  `json:"video_codec,omitempty"`
 	AudioCodec string  `json:"audio_codec,omitempty"`
 	Channels   int     `json:"channels,omitempty"`
+	FrameRate  float64 `json:"frame_rate,omitempty"`
 	Image      bool    `json:"still_image"`
+}
+
+// frameRate parses an FFprobe rational such as "30000/1001". Unknown or
+// implausible rates ("0/0", "N/A") return 0.
+func frameRate(v string) float64 {
+	num, den, ok := strings.Cut(v, "/")
+	if !ok {
+		den = "1"
+	}
+	n, e1 := strconv.ParseFloat(num, 64)
+	d, e2 := strconv.ParseFloat(den, 64)
+	if e1 != nil || e2 != nil || d <= 0 || n <= 0 || math.IsInf(n/d, 0) || n/d > 1000 {
+		return 0
+	}
+	return n / d
 }
 
 func limitedArgs(file string) []string {
@@ -65,7 +86,7 @@ func limitedArgs(file string) []string {
 }
 func (p *MediaProcessor) probe(ctx context.Context, dir, file string) (metadata, error) {
 	var out metadata
-	args := append(limitedArgs(file), "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,width,height,channels:stream_side_data=rotation", "-of", "json")
+	args := append(limitedArgs(file), "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,width,height,channels,avg_frame_rate,r_frame_rate:stream_side_data=rotation:stream_disposition=attached_pic", "-of", "json")
 	data, e := p.Execute(ctx, dir, "ffprobe", args)
 	if e != nil {
 		return out, e
@@ -86,10 +107,14 @@ func (p *MediaProcessor) probe(ctx context.Context, dir, file string) (metadata,
 			if s.Width < 1 || s.Height < 1 || int64(s.Width)*int64(s.Height) > p.Config.MaxPixels {
 				return out, errDimensions
 			}
-			if out.VideoCodec == "" {
+			// Cover art is a still attached picture, not the primary video.
+			if out.VideoCodec == "" && s.Disposition.AttachedPic == 0 {
 				out.VideoCodec = s.Codec
 				out.Width = s.Width
 				out.Height = s.Height
+				if out.FrameRate = frameRate(s.AvgRate); out.FrameRate == 0 {
+					out.FrameRate = frameRate(s.BaseRate)
+				}
 				for _, sd := range s.SideData {
 					if sd.Rotation%180 != 0 {
 						out.Width, out.Height = out.Height, out.Width
@@ -190,7 +215,12 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 		return nil, fault("no_audio_track")
 	}
 	if r.Operation == "remux" {
-		compatible := r.Format == "mp4" && m.VideoCodec == "h264" && (m.AudioCodec == "" || m.AudioCodec == "aac") || r.Format == "webm" && contains([]string{"vp8", "vp9", "av1"}, m.VideoCodec) && (m.AudioCodec == "" || contains([]string{"opus", "vorbis"}, m.AudioCodec))
+		// Removed audio does not need to fit the container.
+		audio := m.AudioCodec
+		if v.AudioMode == "remove" {
+			audio = ""
+		}
+		compatible := r.Format == "mp4" && m.VideoCodec == "h264" && (audio == "" || audio == "aac") || r.Format == "webm" && contains([]string{"vp8", "vp9", "av1"}, m.VideoCodec) && (audio == "" || contains([]string{"opus", "vorbis"}, audio))
 		if !compatible {
 			return nil, faultAt("incompatible_output", "output_format")
 		}
@@ -216,10 +246,14 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 		return nil, fault("processing_failed")
 	}
 	if r.Operation != "metadata" {
-		if _, e = p.probe(ctx, dir, output); e != nil {
+		out, e := p.probe(ctx, dir, output)
+		if e != nil {
 			if ctx.Err() != nil {
 				return nil, fault("processing_timeout")
 			}
+			return nil, fault("processing_failed")
+		}
+		if v.AudioMode == "remove" && out.AudioCodec != "" {
 			return nil, fault("processing_failed")
 		}
 	}
@@ -237,16 +271,22 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 	return &Result{Type: types[r.Format], Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 func buildArgs(input, output string, r Request, p Params, m metadata, c Config) []string {
+	fnum := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
 	args := []string{"-hide_banner", "-nostdin", "-y"}
+	if r.Operation == "trim" {
+		// Input-side seek skips decoding up to the start and stays
+		// frame-accurate because trim always re-encodes.
+		args = append(args, "-ss", fnum(p.Start))
+	}
 	args = append(args, limitedArgs(input)...)
 	args = append(args, "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn")
-	fnum := func(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
 	if r.Operation == "thumbnail" {
 		args = append(args, "-ss", fnum(p.Timestamp))
 	}
 	if r.Operation == "trim" {
-		args = append(args, "-ss", fnum(p.Start), "-t", fnum(p.Duration))
+		args = append(args, "-t", fnum(p.Duration))
 	}
+	var filters []string
 	if p.Width > 0 {
 		fit := "decrease"
 		if p.Fit == "cover" {
@@ -261,30 +301,66 @@ func buildArgs(input, output string, r Request, p Params, m metadata, c Config) 
 		} else {
 			filter += fmt.Sprintf(",crop=%d:%d", p.Width, p.Height)
 		}
-		args = append(args, "-vf", filter+",setsar=1")
+		filters = append(filters, filter)
+	}
+	if p.MaxDimension > 0 {
+		if w, h := boundedSize(m.Width, m.Height, p.MaxDimension); w != m.Width || h != m.Height {
+			filters = append(filters, fmt.Sprintf("scale=%d:%d", w, h))
+		}
+	}
+	if p.MaxFPS > 0 && m.FrameRate > float64(p.MaxFPS)+0.01 {
+		filters = append(filters, fmt.Sprintf("fps=%d", p.MaxFPS))
+	}
+	if len(filters) > 0 {
+		args = append(args, "-vf", strings.Join(append(filters, "setsar=1"), ","))
+	}
+	audio := []string{"-map", "0:a:0?"}
+	if p.AudioMode == "remove" {
+		audio = []string{"-an"}
 	}
 	switch r.Operation {
-	case "resize", "thumbnail":
+	case "resize":
 		args = append(args, "-map", "0:v:0", "-frames:v", "1", "-an")
-		if r.Format == "jpg" {
-			args = append(args, "-c:v", "mjpeg", "-q:v", strconv.Itoa(jpegQScale(p.JPEGQuality)))
-		} else {
-			args = append(args, "-c:v", "png")
-		}
+	case "thumbnail":
+		args = append(args, "-map", "0:V:0", "-frames:v", "1", "-an")
 	case "extract_audio":
 		args = append(args, "-map", "0:a:0", "-vn", "-ac", strconv.Itoa(p.Channels))
 		codec := map[string]string{"mp3": "libmp3lame", "m4a": "aac", "opus": "libopus"}[r.Format]
 		args = append(args, "-c:a", codec, "-b:a", strconv.Itoa(p.Bitrate)+"k")
 	case "remux":
-		args = append(args, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy")
+		args = append(args, "-map", "0:V:0")
+		args = append(args, audio...)
+		args = append(args, "-c", "copy")
 	default:
-		args = append(args, "-map", "0:v:0", "-map", "0:a:0?")
+		args = append(args, "-map", "0:V:0")
+		args = append(args, audio...)
 		if r.Format == "mp4" {
-			args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", strconv.Itoa(p.Quality), "-c:a", "aac")
+			preset := "veryfast"
+			if p.MaxBitrate > 0 {
+				// Size-bound output: a slower preset compresses better.
+				preset = "medium"
+			}
+			args = append(args, "-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p", "-profile:v", "high", "-crf", strconv.Itoa(p.Quality))
+			if p.MaxBitrate > 0 {
+				args = append(args, "-maxrate", strconv.Itoa(p.MaxBitrate)+"k", "-bufsize", strconv.Itoa(2*p.MaxBitrate)+"k")
+			}
 		} else {
-			args = append(args, "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", strconv.Itoa(p.Quality), "-c:a", "libopus")
+			args = append(args, "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", strconv.Itoa(p.Quality))
 		}
-		args = append(args, "-b:a", strconv.Itoa(p.Bitrate)+"k")
+		if p.AudioMode != "remove" {
+			codec := map[string]string{"mp4": "aac", "webm": "libopus"}[r.Format]
+			args = append(args, "-c:a", codec, "-b:a", strconv.Itoa(p.Bitrate)+"k")
+			if m.Channels > 2 {
+				args = append(args, "-ac", "2")
+			}
+		}
+	}
+	if r.Operation == "resize" || r.Operation == "thumbnail" {
+		if r.Format == "jpg" {
+			args = append(args, "-c:v", "mjpeg", "-q:v", strconv.Itoa(jpegQScale(p.JPEGQuality)))
+		} else {
+			args = append(args, "-c:v", "png")
+		}
 	}
 	mux := map[string]string{"mp4": "mp4", "webm": "webm", "jpg": "image2", "png": "image2", "m4a": "ipod", "mp3": "mp3", "opus": "ogg"}[r.Format]
 	if r.Format == "mp4" || r.Format == "m4a" {
@@ -297,6 +373,18 @@ func buildArgs(input, output string, r Request, p Params, m metadata, c Config) 
 		args = append(args, "-t", fnum(c.MaxDuration))
 	}
 	return append(args, "-f", mux, output)
+}
+
+// boundedSize scales width × height so the longer edge is at most limit,
+// keeping the aspect ratio, never upscaling and rounding down to even sizes.
+// The dimensions are orientation-adjusted, matching FFmpeg's auto-rotation.
+func boundedSize(width, height, limit int) (int, int) {
+	scale := 1.0
+	if long := max(width, height); long > limit {
+		scale = float64(limit) / float64(long)
+	}
+	even := func(v int) int { return max(2, int(float64(v)*scale)/2*2) }
+	return even(width), even(height)
 }
 
 type cappedBuffer struct {

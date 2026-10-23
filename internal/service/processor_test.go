@@ -161,3 +161,168 @@ func TestAsyncRangeAndRetryableCodes(t *testing.T) {
 		t.Fatal("retryable flags do not follow the contract")
 	}
 }
+
+// runFixture validates and processes one request against a fixture file and
+// returns the probed output.
+func runFixture(t *testing.T, source, op, format, params string) (metadata, string) {
+	t.Helper()
+	dir := t.TempDir()
+	data, _ := os.ReadFile(source)
+	os.WriteFile(filepath.Join(dir, "input"), data, 0600)
+	r := request(data)
+	r.Operation = op
+	r.Format = format
+	json.Unmarshal([]byte(params), &r.Parameters)
+	c := DefaultConfig()
+	v, verr := r.Validate(c)
+	if verr != nil {
+		t.Fatal(verr)
+	}
+	p := MediaProcessor{Config: c, Execute: fixtureExecutor}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, f := p.Process(ctx, dir, r, v); f != nil {
+		t.Fatalf("%s %s: %+v", op, params, f)
+	}
+	output := filepath.Join(dir, "output")
+	var m metadata
+	var e error
+	if op == "metadata" {
+		data, _ = os.ReadFile(output)
+		e = json.Unmarshal(data, &m)
+	} else {
+		m, e = p.probe(ctx, dir, output)
+	}
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m, output
+}
+
+func TestVideoExtensions(t *testing.T) {
+	if _, e := exec.LookPath("ffmpeg"); e != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	fixtures := t.TempDir()
+	makeFixture := func(name string, args ...string) string {
+		t.Helper()
+		path := filepath.Join(fixtures, name)
+		cmd := exec.Command("ffmpeg", append(append([]string{"-v", "error", "-y", "-threads", "1", "-filter_threads", "1"}, args...), path)...)
+		if out, e := cmd.CombinedOutput(); e != nil {
+			t.Fatalf("%v: %s", e, out)
+		}
+		return path
+	}
+	surround := makeFixture("surround.mp4", "-f", "lavfi", "-i", "testsrc=s=96x54:r=30:d=2", "-f", "lavfi", "-i", "sine=d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "6")
+	slow := makeFixture("slow.mp4", "-f", "lavfi", "-i", "testsrc=s=64x64:r=10:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p")
+	rotated := makeFixture("rotated.mp4", "-display_rotation", "90", "-i", surround, "-c", "copy")
+	cover := makeFixture("cover.png", "-f", "lavfi", "-i", "color=c=red:s=32x32", "-frames:v", "1")
+	withCover := makeFixture("cover.mp4", "-i", cover, "-i", surround, "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:0", "attached_pic")
+	tenBit := makeFixture("tenbit.mp4", "-f", "lavfi", "-i", "testsrc=s=64x64:r=10:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p10le")
+	webm := makeFixture("clip.webm", "-f", "lavfi", "-i", "testsrc=s=64x64:r=10:d=1", "-f", "lavfi", "-i", "sine=d=1", "-c:v", "libvpx-vp9", "-c:a", "libopus")
+	coverMP3 := makeFixture("cover.mp3", "-f", "lavfi", "-i", "sine=d=1", "-i", cover, "-map", "0", "-map", "1", "-c:a", "libmp3lame", "-c:v", "png", "-disposition:v:0", "attached_pic")
+
+	t.Run("silent capped animation", func(t *testing.T) {
+		m, _ := runFixture(t, surround, "transcode", "mp4", `{"audio_mode":"remove","max_dimension":48,"max_fps":15,"quality":28,"max_bitrate_kbps":200}`)
+		if m.AudioCodec != "" || m.Width != 48 || m.Height != 26 || m.FrameRate > 15.01 {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("rotated source keeps orientation", func(t *testing.T) {
+		if m, _ := runFixture(t, rotated, "transcode", "mp4", `{"max_dimension":48}`); m.Width != 26 || m.Height != 48 {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("never upscales or raises frame rate", func(t *testing.T) {
+		m, _ := runFixture(t, slow, "transcode", "mp4", `{"max_dimension":640,"max_fps":15}`)
+		if m.Width != 64 || m.Height != 64 || m.FrameRate < 9.9 || m.FrameRate > 10.1 {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("surround is downmixed", func(t *testing.T) {
+		if m, _ := runFixture(t, surround, "transcode", "mp4", `{}`); m.Channels != 2 {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("10-bit source becomes High profile yuv420p", func(t *testing.T) {
+		_, output := runFixture(t, tenBit, "transcode", "mp4", `{}`)
+		out, e := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=profile,pix_fmt", "-of", "csv=p=0", output).Output()
+		if e != nil || strings.TrimSpace(string(out)) != "High,yuv420p" {
+			t.Fatalf("%q %v", out, e)
+		}
+	})
+	t.Run("cover art is not the primary video", func(t *testing.T) {
+		m, _ := runFixture(t, withCover, "metadata", "json", `{}`)
+		if m.Width != 96 || m.Height != 54 {
+			t.Fatalf("%+v", m)
+		}
+		if m, _ = runFixture(t, withCover, "transcode", "mp4", `{"audio_mode":"remove"}`); m.Width != 96 || m.Height != 54 || m.AudioCodec != "" {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("audio with cover art has no video", func(t *testing.T) {
+		dir := t.TempDir()
+		data, _ := os.ReadFile(coverMP3)
+		os.WriteFile(filepath.Join(dir, "input"), data, 0600)
+		r := request(data)
+		r.Operation, r.Format = "transcode", "mp4"
+		v, _ := r.Validate(DefaultConfig())
+		p := MediaProcessor{Config: DefaultConfig(), Execute: fixtureExecutor}
+		if _, f := p.Process(context.Background(), dir, r, v); f == nil || f.Code != "unsupported_media" {
+			t.Fatalf("%+v", f)
+		}
+	})
+	t.Run("trim with geometry and no audio", func(t *testing.T) {
+		m, _ := runFixture(t, surround, "trim", "mp4", `{"start_seconds":1,"duration_seconds":0.5,"audio_mode":"remove","max_dimension":32,"max_fps":12}`)
+		if m.AudioCodec != "" || m.Width != 32 || m.Height != 18 || m.Duration > 0.8 || m.FrameRate > 12.01 {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("mute remux keeps the container", func(t *testing.T) {
+		if m, _ := runFixture(t, surround, "remux", "mp4", `{"audio_mode":"remove"}`); m.AudioCodec != "" || m.VideoCodec != "h264" {
+			t.Fatalf("%+v", m)
+		}
+		if m, _ := runFixture(t, webm, "remux", "webm", `{"audio_mode":"remove"}`); m.AudioCodec != "" || m.VideoCodec != "vp9" {
+			t.Fatalf("%+v", m)
+		}
+	})
+	t.Run("removed audio relaxes remux compatibility", func(t *testing.T) {
+		vp9InMKV := makeFixture("vp9-aac.mkv", "-f", "lavfi", "-i", "testsrc=s=64x64:r=10:d=1", "-f", "lavfi", "-i", "sine=d=1", "-c:v", "libvpx-vp9", "-c:a", "aac")
+		if m, _ := runFixture(t, vp9InMKV, "remux", "webm", `{"audio_mode":"remove"}`); m.AudioCodec != "" {
+			t.Fatalf("%+v", m)
+		}
+	})
+}
+
+func TestExtensionArguments(t *testing.T) {
+	c := DefaultConfig()
+	m := metadata{Width: 1920, Height: 1080, FrameRate: 30, Channels: 6, VideoCodec: "h264"}
+	trim := strings.Join(buildArgs("in", "out", Request{Operation: "trim", Format: "mp4"}, Params{Start: 5, Duration: 2, Quality: 28, Bitrate: 128, AudioMode: "remove", MaxDimension: 640, MaxFPS: 15, MaxBitrate: 800}, m, c), " ")
+	for _, want := range []string{"-ss 5.000000 -v error", "-i in", "-t 2.000000", "-vf scale=640:360,fps=15,setsar=1", "-map 0:V:0 -an", "-preset medium", "-profile:v high", "-maxrate 800k -bufsize 1600k"} {
+		if !strings.Contains(trim, want) {
+			t.Fatalf("missing %q in %s", want, trim)
+		}
+	}
+	if strings.Contains(trim, "0:a") || strings.Contains(trim, "-c:a") {
+		t.Fatal(trim)
+	}
+	transcode := strings.Join(buildArgs("in", "out", Request{Operation: "transcode", Format: "mp4"}, Params{Quality: 23, Bitrate: 128, AudioMode: "preserve"}, m, c), " ")
+	for _, want := range []string{"-map 0:V:0 -map 0:a:0?", "-preset veryfast", "-c:a aac -b:a 128k -ac 2"} {
+		if !strings.Contains(transcode, want) {
+			t.Fatalf("missing %q in %s", want, transcode)
+		}
+	}
+	if strings.Contains(transcode, "-vf") || strings.Contains(transcode, "-maxrate") {
+		t.Fatal(transcode)
+	}
+	for _, tc := range []struct{ w, h, limit, ew, eh int }{
+		{1920, 1080, 640, 640, 360}, {1080, 1920, 640, 360, 640}, {96, 54, 48, 48, 26}, {64, 64, 640, 64, 64}, {65, 33, 640, 64, 32},
+	} {
+		if w, h := boundedSize(tc.w, tc.h, tc.limit); w != tc.ew || h != tc.eh {
+			t.Fatalf("%dx%d/%d: got %dx%d", tc.w, tc.h, tc.limit, w, h)
+		}
+	}
+	if frameRate("30000/1001") < 29.9 || frameRate("0/0") != 0 || frameRate("N/A") != 0 || frameRate("25") != 25 {
+		t.Fatal("frame rate parsing")
+	}
+}

@@ -1,6 +1,6 @@
 # Build status — 22 October 2026
 
-Initial implementation: 0.1.0. Repository: [Rionquosue/FFMPEG_container](https://github.com/Rionquosue/FFMPEG_container). No image publication, release publication or server deployment has been performed.
+Current version: 0.2.0 (initial implementation 0.1.0). Repository: [Rionquosue/FFMPEG_container](https://github.com/Rionquosue/FFMPEG_container). No image publication, release publication or server deployment has been performed.
 
 ## Completed locally
 
@@ -17,6 +17,20 @@ Initial implementation: 0.1.0. Repository: [Rionquosue/FFMPEG_container](https:/
 | Supporting files | Python compilation, shell syntax, Compose/workflow YAML parsing passed |
 
 Toolchain: verified official Go 1.27.3 archive. Media tests used the workspace's Ubuntu FFmpeg 6.1.1. They use an executor that exists only in test code; production has no unrestricted executor switch.
+
+## 0.2.0 — video operation extensions (23 October 2026)
+
+| Change | Verification |
+|---|---|
+| `audio_mode` on `transcode`, `trim` and `remux`; output re-probed for leftover audio | Fixture tests: no audio after transcode, trim, MP4 remux and WebM remux; VP9 with AAC remuxes to WebM once audio is removed |
+| `max_dimension`, `max_fps`, `max_bitrate_kbps` (transcode and trim) | Fixture tests: landscape and 90°-rotated sources capped without padding, no upscaling of a small source, a 10 fps source kept at 10 fps, 30 fps capped to 15 and 12; argument tests for capped CRF and preset |
+| `trim` accepts the transcode geometry/audio parameters and seeks before `-i` | Fixture test of a 0.5 s clip from 1 s with resize, frame-rate cap and audio removal; argument test of seek placement |
+| Primary video `0:V:0`; attached pictures ignored by the probe | Fixture tests: MP4 with cover art reports and encodes the real video; MP3 with cover art is treated as audio-only |
+| H.264 High profile, stereo downmix of more than two channels | Fixture tests: 10-bit input → High/yuv420p; 5.1 input → 2 channels |
+| `frame_rate` in metadata; `parameters` map and process/upload timeouts in capabilities | Unit tests; OpenAPI and `scripts/check-contract.py` updated with positive and negative examples |
+| Validation and idempotency | Tests for every new field error, the `max_dimension`/`width` exclusion, mp4-only bitrate cap, even trim dimensions, and an unchanged fingerprint when `audio_mode: "preserve"` is explicit |
+
+Local run: `go test -race -count=1 ./...`, `go vet ./...` and `scripts/check-contract.py` passed with Go 1.24.7 and Ubuntu FFmpeg 6.1.1. The container smoke client gained an audio-removal transcode, a mute remux and a capabilities check; it was not run here (no Docker daemon), so CI must pass before deployment.
 
 ## Not verified in this environment
 

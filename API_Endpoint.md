@@ -110,14 +110,22 @@ curl -H "Authorization: Bearer $KEY" http://ffmpeg:8080/v1/capabilities
     "extract_audio": ["m4a", "mp3", "opus"], "trim": ["mp4", "webm"], "remux": ["mp4", "webm"],
     "metadata": ["json"]
   },
+  "parameters": {
+    "transcode": ["width", "height", "fit", "quality", "audio_bitrate_kbps", "audio_mode", "max_dimension", "max_fps", "max_bitrate_kbps"],
+    "trim": ["start_seconds", "duration_seconds", "quality", "width", "height", "fit", "audio_bitrate_kbps", "audio_mode", "max_dimension", "max_fps", "max_bitrate_kbps"],
+    "remux": ["audio_mode"], "metadata": [], "…": []
+  },
   "codecs": { "mp4": "h264/aac", "webm": "vp9/opus", "jpg": "mjpeg", "png": "png", "m4a": "aac", "mp3": "mp3", "opus": "opus" },
   "limits": {
     "max_upload_bytes": 268435456, "max_output_bytes": 268435456, "max_duration_seconds": 600,
     "max_pixels": 16777216, "max_concurrent_jobs": 1, "max_retained_jobs": 2,
-    "max_jobs_per_consumer": 2, "job_ttl_seconds": 900
+    "max_jobs_per_consumer": 2, "job_ttl_seconds": 900,
+    "process_timeout_seconds": 120, "upload_timeout_seconds": 120
   }
 }
 ```
+
+`parameters` lists the parameter names each operation accepts; use it to detect optional features rather than assuming a service version.
 
 ## POST /v1/jobs
 
@@ -247,13 +255,24 @@ Each operation accepts only its own parameters. Dimensions are integers from 16 
 
 | Operation | Output formats | Parameters (defaults) |
 |---|---|---|
-| `transcode` | `mp4` (H.264/AAC), `webm` (VP9/Opus) | `width`, `height` (optional pair, **even**), `fit` (`contain`), `quality` 18–35 (23), `audio_bitrate_kbps` 64–320 (128) |
+| `transcode` | `mp4` (H.264 High/AAC), `webm` (VP9/Opus) | `width`, `height` (optional pair, **even**), `fit` (`contain`), `quality` 18–35 (23), `audio_bitrate_kbps` 64–320 (128), `audio_mode` (`preserve`), `max_dimension`, `max_fps`, `max_bitrate_kbps` (mp4 only) |
 | `resize` | `jpg`, `png`; still images only | `width`, `height` (required), `fit` (`contain`), `jpeg_quality` 50–95 (85, jpg only) |
 | `thumbnail` | `jpg`, `png`; one video frame | `timestamp_seconds` (required), `width`, `height` (required), `fit` (`contain`), `jpeg_quality` 50–95 (85, jpg only) |
 | `extract_audio` | `m4a` (AAC), `mp3`, `opus` (Ogg) | `audio_bitrate_kbps` 64–320 (128), `channels` 1 or 2 (2) |
-| `trim` | `mp4`, `webm` | `start_seconds` (required), `duration_seconds` > 0 (required), `quality` 18–35 (23) |
-| `remux` | `mp4`, `webm` | none; stream copy only (H.264/AAC into MP4; VP8/VP9/AV1 with Opus/Vorbis into WebM) |
-| `metadata` | `json` | none; the result file holds `format`, `duration_seconds`, `width`, `height`, `still_image`, and optional `video_codec`, `audio_codec`, `channels` |
+| `trim` | `mp4`, `webm` | `start_seconds` (required), `duration_seconds` > 0 (required), and the same optional parameters as `transcode` |
+| `remux` | `mp4`, `webm` | `audio_mode` (`preserve`); stream copy only (H.264/AAC into MP4; VP8/VP9/AV1 with Opus/Vorbis into WebM; with `audio_mode: "remove"` only the video codec must fit) |
+| `metadata` | `json` | none; the result file holds `format`, `duration_seconds`, `width`, `height`, `still_image`, and optional `video_codec`, `audio_codec`, `channels`, `frame_rate` |
+
+Video parameters added in 0.2.0, all optional:
+
+| Parameter | Range | Effect |
+|---|---|---|
+| `audio_mode` | `preserve` or `remove` | `remove` writes no audio stream; the output is probed and the job fails with `processing_failed` if any audio remains |
+| `max_dimension` | even integer 16–4096 | Longest edge of the output after auto-rotation. Keeps the aspect ratio, never pads, never upscales; odd source sizes are rounded down to even. Cannot be combined with `width`/`height` |
+| `max_fps` | integer 1–60 | Frame-rate ceiling, applied only when the source is faster; a slower source keeps its rate |
+| `max_bitrate_kbps` | integer 100–20000, `mp4` only | Capped CRF (`-maxrate`, `-bufsize` twice the cap) with a slower encoder preset for smaller output |
+
+Video operations always use the primary video stream and ignore attached cover art. MP4 video is H.264 High profile, `yuv420p`. Audio from sources with more than two channels is downmixed to stereo. `trim` seeks before decoding and re-encodes, so cuts are frame-accurate.
 
 Inputs accepted: MOV/MP4, Matroska/WebM, MP3, WAV, FLAC, Ogg, AAC, PNG and JPEG. Playlists (HLS, concat), URLs, AVI, SVG/HTML, archives, animated images and files referencing external resources are rejected. Location and other source metadata are stripped from outputs; MP4 and M4A are written with faststart.
 
@@ -264,6 +283,8 @@ Example parameter sets:
 {"operation":"resize","parameters":{"width":1080,"height":1080,"fit":"cover","jpeg_quality":82},"output_format":"jpg"}
 {"operation":"extract_audio","parameters":{"audio_bitrate_kbps":96,"channels":1},"output_format":"opus"}
 {"operation":"trim","parameters":{"start_seconds":5,"duration_seconds":15},"output_format":"webm"}
+{"operation":"transcode","parameters":{"audio_mode":"remove","max_dimension":640,"max_fps":15,"quality":28,"max_bitrate_kbps":800},"output_format":"mp4"}
+{"operation":"remux","parameters":{"audio_mode":"remove"},"output_format":"mp4"}
 {"operation":"metadata","parameters":{},"output_format":"json"}
 ```
 

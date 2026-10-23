@@ -2,7 +2,7 @@
 
 A standalone Alpine container with a Go HTTP API, FFmpeg/FFprobe, temporary RAM-backed storage, and a mandatory Linux sandbox. No PostgreSQL, Redis or durable media volume.
 
-Version: **0.1.0 — initial implementation**. See [BUILD_STATUS.md](BUILD_STATUS.md) for completed checks and remaining deployment verification. This repository is ready to build; the included Docker image has not been executed in the authoring environment.
+Version: **0.2.0** — adds audio removal, longest-edge, frame-rate and bitrate caps, and cover-art-safe stream selection to the video operations. See [BUILD_STATUS.md](BUILD_STATUS.md) for completed checks and remaining deployment verification. This repository is ready to build; the included Docker image has not been executed in the authoring environment.
 
 ## Requirements
 
@@ -93,8 +93,8 @@ The service validates the full streamed upload before returning 202 and a status
 | resize | jpg, png; still images only |
 | thumbnail | jpg, png; one video frame |
 | extract_audio | m4a, mp3, opus |
-| trim | mp4, webm; re-encoded boundaries |
-| remux | mp4, webm; compatible codecs only |
+| trim | mp4, webm; frame-accurate re-encoded boundaries |
+| remux | mp4, webm; compatible codecs only; optional audio removal |
 | metadata | json; sanitized format/duration/stream summary |
 
 Input demuxers are explicitly limited to MOV/MP4, Matroska/WebM, MP3, WAV, FLAC, Ogg, AAC, PNG and JPEG. Playlists, arbitrary URLs, animated-image processing, SVG, archives and user filter expressions are unsupported. Non-image inputs must have a known bounded duration. Remux v1 supports H.264/AAC into MP4 and VP8/VP9/AV1 plus Opus/Vorbis into WebM.
@@ -128,12 +128,12 @@ Unknown object fields, duplicate JSON keys, null parameters and parameters belon
 
 | Operation | Required parameters | Optional parameters and defaults |
 |---|---|---|
-| `transcode` | None | `width` and `height` together; `fit="contain"`; `quality=23`; `audio_bitrate_kbps=128` |
+| `transcode` | None | `width` and `height` together; `fit="contain"`; `quality=23`; `audio_bitrate_kbps=128`; `audio_mode="preserve"`; `max_dimension`; `max_fps`; `max_bitrate_kbps` (mp4 only) |
 | `resize` | `width`, `height` | `fit="contain"`; `jpeg_quality=85` (50–95, jpg output only) |
 | `thumbnail` | `timestamp_seconds`, `width`, `height` | `fit="contain"`; `jpeg_quality=85` (50–95, jpg output only) |
 | `extract_audio` | None | `audio_bitrate_kbps=128`, `channels=2` |
-| `trim` | `start_seconds`, `duration_seconds` | `quality=23` |
-| `remux` | None | None; send `{}` |
+| `trim` | `start_seconds`, `duration_seconds` | Same optional parameters as `transcode` |
+| `remux` | None | `audio_mode="preserve"`; send `{}` for the default |
 | `metadata` | None | None; send `{}` |
 
 Parameter constraints:
@@ -141,6 +141,11 @@ Parameter constraints:
 - `width` and `height`: integers 16–4096, with their product at most `max_pixels`. Both must be supplied together. Transcode dimensions must be even; omitting both preserves source geometry subject to encoder requirements.
 - `fit`: `contain` (preserve aspect ratio and pad) or `cover` (preserve aspect ratio and center-crop). A request requiring upscaling fails during processing.
 - `quality`: integer 18–35; lower values request higher visual quality.
+- `audio_mode`: `preserve` or `remove`. `remove` writes no audio stream and the output is verified to contain none. With `remux`, removed audio no longer needs to fit the container.
+- `max_dimension`: even integer 16–4096 capping the longest edge after auto-rotation. Aspect ratio is kept, nothing is padded and the source is never upscaled. It cannot be combined with `width`/`height`.
+- `max_fps`: integer 1–60; applied only when the source frame rate is higher.
+- `max_bitrate_kbps`: integer 100–20000, mp4 output only; capped CRF with a slower encoder preset.
+- Video operations use the primary video stream and ignore attached cover art. MP4 video is H.264 High profile `yuv420p`; audio with more than two channels is downmixed to stereo.
 - `audio_bitrate_kbps`: integer 64–320. `channels`: integer 1 or 2.
 - Time values: finite JSON numbers in seconds, from zero through `max_duration_seconds`. Thumbnail timestamp must be before the input's end. Trim duration must be greater than zero and `start_seconds + duration_seconds` must not exceed the input duration.
 
@@ -189,7 +194,7 @@ The result is available only in `completed` state. Queued/processing jobs return
 
 `DELETE /v1/jobs/{id}` has no request body. A queued or processing job returns **202** and moves to `cancelling`, then to the `deleted` tombstone. A finished job returns **204** once its files are removed, or **202** if an active download pin delays removal; either way it is a `deleted` tombstone straight away. DELETE on a deleted or expired tombstone returns 204; unknown or inaccessible jobs return 404. Deletion cancels active downloads. There is no automatic retry of a failed processing job; use a new idempotency key for a deliberate new attempt.
 
-The `metadata` operation also produces a downloadable file, with `application/json` content. It contains `format`, numeric `duration_seconds`, integer `width` and `height`, boolean `still_image`, and optional `video_codec`, `audio_codec`, and `channels`. It excludes arbitrary source tags. Dimensions are orientation-adjusted; audio-only inputs have zero dimensions.
+The `metadata` operation also produces a downloadable file, with `application/json` content. It contains `format`, numeric `duration_seconds`, integer `width` and `height`, boolean `still_image`, and optional `video_codec`, `audio_codec`, `channels` and `frame_rate`. It excludes arbitrary source tags. Dimensions are orientation-adjusted; audio-only inputs have zero dimensions.
 
 ### Errors
 
@@ -231,7 +236,7 @@ Asynchronous failures appear in `job.error` on a **200 status response**, with o
 
 Both health endpoints return **200** with `{"ok":true}` while healthy. Readiness returns 503 during shutdown. The server only starts listening after mandatory sandbox, encoder and tmpfs checks succeed.
 
-`GET /v1/capabilities` returns **200** with `api_version`, `instance_id`, an `operations` map (operation → supported output formats), a `codecs` map (format → codec description), and `limits`. The exposed limits are `max_upload_bytes`, `max_output_bytes`, `max_duration_seconds`, `max_pixels`, `max_concurrent_jobs`, `max_retained_jobs`, `max_jobs_per_consumer`, and `job_ttl_seconds`. Read these values rather than assuming the defaults below. A changed instance ID indicates that previous in-memory jobs may have been lost. The processing queue is bounded and does not promise FIFO ordering.
+`GET /v1/capabilities` returns **200** with `api_version`, `instance_id`, an `operations` map (operation → supported output formats), a `parameters` map (operation → accepted parameter names), a `codecs` map (format → codec description), and `limits`. The exposed limits are `max_upload_bytes`, `max_output_bytes`, `max_duration_seconds`, `max_pixels`, `max_concurrent_jobs`, `max_retained_jobs`, `max_jobs_per_consumer`, `job_ttl_seconds`, `process_timeout_seconds` and `upload_timeout_seconds`. Detect optional parameters from `parameters` rather than from a version number. Read these values rather than assuming the defaults below. A changed instance ID indicates that previous in-memory jobs may have been lost. The processing queue is bounded and does not promise FIFO ordering.
 
 ## Streaming client
 
