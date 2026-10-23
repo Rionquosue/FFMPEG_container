@@ -291,4 +291,4 @@ Go tests include an explicitly test-only direct executor for generated media fix
 
 GitHub Actions runs native amd64/arm64 tests, Docker build, container API/confinement smoke tests, a vulnerability scan and SBOM generation. No images or releases are published automatically. The workflow must pass on the target-compatible runners before deploying. The image build uses digest-pinned Alpine/Go bases, installs current repository FFmpeg packages, and records their exact versions. Pin the final image digest after a successful scan; rebuild regularly for security patches.
 
-The fixed scanner policy fails on fixable high/critical findings; review unfixed findings too. CI action references are version tags, not commit digests, and should be pinned by the repository's supply-chain policy before public release.
+The fixed scanner policy fails on fixable high/critical findings; review unfixed findings too. Trivy is pinned to a verified release commit. The remaining CI action references are version tags and should be pinned by the repository's supply-chain policy before public release.

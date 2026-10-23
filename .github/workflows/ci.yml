@@ -37,7 +37,7 @@ jobs:
           docker image inspect ffmpeg-service:test > dist/image-inspect.json
           docker run --rm --entrypoint cat ffmpeg-service:test /usr/share/ffmpeg-service/packages.txt > dist/packages.txt
       - name: Vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ffmpeg-service:test
           format: table
@@ -45,7 +45,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
       - name: Generate SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ffmpeg-service:test
           format: cyclonedx
