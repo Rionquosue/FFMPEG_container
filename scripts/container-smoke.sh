@@ -18,11 +18,14 @@ python3 - "$scratch" <<'PY'
 import json, secrets, sys
 from pathlib import Path
 p=Path(sys.argv[1])/"keys.json"
-p.write_text(json.dumps({"consumers":[{"id":"test","keys":[secrets.token_urlsafe(32)]}]}))
+p.write_text(json.dumps({"consumers":[{"id":"test","keys":[secrets.token_urlsafe(32)]},
+                                      {"id":"other","keys":[secrets.token_urlsafe(32)]}]}))
 p.chmod(0o644)
 PY
 ffmpeg -v error -y -f lavfi -i color=c=blue:s=64x64:r=10 -f lavfi -i sine=frequency=440 \
   -t 1 -threads 1 -filter_threads 1 -c:v libx264 -pix_fmt yuv420p -c:a aac "$scratch/input.mp4"
+ffmpeg -v error -y -f lavfi -i color=c=black:s=16x16:r=1 -t 7200 -threads 1 -c:v libx264 -preset ultrafast \
+  -pix_fmt yuv420p "$scratch/long.mp4"
 docker pull python:3.12-alpine >/dev/null
 docker network create --internal "$network" >/dev/null
 docker run -d --name "$container" --network "$network" --network-alias ffmpeg \
@@ -40,5 +43,16 @@ if [ "$ready" != 1 ]; then docker logs "$container"; exit 1; fi
 docker run --rm --network "$network" --read-only --cap-drop ALL \
   -v "$PWD/scripts:/scripts:ro" -v "$scratch:/fixtures:ro" \
   python:3.12-alpine python /scripts/smoke-client.py
+docker run --rm --network "$network" --read-only --cap-drop ALL \
+  -v "$PWD/scripts:/scripts:ro" -v "$scratch:/fixtures:ro" \
+  python:3.12-alpine python /scripts/security-client.py
+# Container hardening: non-root, no capabilities, read-only root, secrets unreadable to jobs.
 docker exec "$container" sh -c 'test "$(id -u)" = 10001'
+docker exec "$container" sh -c 'grep -q "^CapEff:[[:space:]]*0*$" /proc/1/status'
+if docker exec "$container" sh -c 'touch /usr/local/bin/x' 2>/dev/null; then echo "root filesystem is writable"; exit 1; fi
+if docker exec "$container" sh -c 'mkdir -p /work/job-sec && cd /work/job-sec && touch input output &&
+     /usr/local/bin/media-sandbox --job /work/job-sec 1048576 10 ffprobe -v error -i /run/secrets/api_keys' 2>/dev/null; then
+  echo "sandboxed ffprobe could read the API keys"; exit 1
+fi
+echo "container hardening checks passed"
 docker logs "$container"
