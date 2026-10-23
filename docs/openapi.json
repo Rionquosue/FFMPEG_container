@@ -910,6 +910,13 @@
                   "cover"
                 ],
                 "default": "contain"
+              },
+              "jpeg_quality": {
+                "type": "integer",
+                "minimum": 50,
+                "maximum": 95,
+                "default": 85,
+                "description": "JPEG output only; invalid_parameter with png."
               }
             },
             "required": [
@@ -969,6 +976,13 @@
                 "type": "number",
                 "minimum": 0,
                 "maximum": 86400
+              },
+              "jpeg_quality": {
+                "type": "integer",
+                "minimum": 50,
+                "maximum": 95,
+                "default": 85,
+                "description": "JPEG output only; invalid_parameter with png."
               }
             },
             "required": [
@@ -1261,7 +1275,6 @@
               "failed",
               "cancelling",
               "cancelled",
-              "deleting",
               "deleted",
               "expired"
             ]

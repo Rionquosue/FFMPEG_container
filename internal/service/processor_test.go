@@ -124,7 +124,40 @@ func TestDeclaredMIMERejected(t *testing.T) {
 	r.declaredMIME = "image/jpeg"
 	p := MediaProcessor{Config: DefaultConfig(), Execute: fixtureExecutor}
 	_, f := p.Process(context.Background(), dir, r, Params{})
-	if f == nil || f.Code != "media_type_mismatch" {
+	if f == nil || f.Code != "unsupported_media" || f.Retryable {
 		t.Fatal(f)
+	}
+}
+
+func TestJPEGQualityScale(t *testing.T) {
+	if jpegQScale(95) != 2 || jpegQScale(50) != 31 || jpegQScale(85) <= 2 {
+		t.Fatal(jpegQScale(95), jpegQScale(85), jpegQScale(50))
+	}
+	args := buildArgs("in", "out", Request{Operation: "resize", Format: "jpg"}, Params{Width: 32, Height: 32, Fit: "contain", JPEGQuality: 50}, metadata{Width: 64, Height: 64}, DefaultConfig())
+	if !strings.Contains(strings.Join(args, " "), "-q:v 31") {
+		t.Fatal(args)
+	}
+}
+
+func TestAsyncRangeAndRetryableCodes(t *testing.T) {
+	if _, e := exec.LookPath("ffmpeg"); e != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "input")
+	cmd := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=64x64:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", path)
+	if out, e := cmd.CombinedOutput(); e != nil {
+		t.Fatalf("%s %v", out, e)
+	}
+	data, _ := os.ReadFile(path)
+	r := request(data)
+	r.Operation, r.Format = "thumbnail", "png"
+	p := MediaProcessor{Config: DefaultConfig(), Execute: fixtureExecutor}
+	_, f := p.Process(context.Background(), dir, r, Params{Width: 32, Height: 32, Fit: "contain", Timestamp: 5})
+	if f == nil || f.Code != "range_out_of_bounds" || f.Field != "parameters.timestamp_seconds" {
+		t.Fatal(f)
+	}
+	if !fault("processing_failed").Retryable || fault("invalid_media").Retryable {
+		t.Fatal("retryable flags do not follow the contract")
 	}
 }

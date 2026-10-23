@@ -111,8 +111,8 @@ Unknown object fields, duplicate JSON keys, null parameters and parameters belon
 | Operation | Required parameters | Optional parameters and defaults |
 |---|---|---|
 | `transcode` | None | `width` and `height` together; `fit="contain"`; `quality=23`; `audio_bitrate_kbps=128` |
-| `resize` | `width`, `height` | `fit="contain"` |
-| `thumbnail` | `timestamp_seconds`, `width`, `height` | `fit="contain"` |
+| `resize` | `width`, `height` | `fit="contain"`; `jpeg_quality=85` (50–95, jpg output only) |
+| `thumbnail` | `timestamp_seconds`, `width`, `height` | `fit="contain"`; `jpeg_quality=85` (50–95, jpg output only) |
 | `extract_audio` | None | `audio_bitrate_kbps=128`, `channels=2` |
 | `trim` | `start_seconds`, `duration_seconds` | `quality=23` |
 | `remux` | None | None; send `{}` |
@@ -153,8 +153,8 @@ Idempotency is scoped to the consumer. The fingerprint includes operation, outpu
 | `queued`, `processing` | Accepted work waiting for or using a processing slot; polling responses include `Retry-After: 2` |
 | `completed` | Result is available; `download_url` and `result` are populated |
 | `failed` | Processing failed; `error` is populated and media is removed |
-| `cancelling`, `cancelled` | Cancellation requested / processing stopped |
-| `deleting` | Active downloads are being stopped before cleanup |
+| `cancelling` | A client DELETE is stopping processing; the job then becomes `deleted` |
+| `cancelled` | The server stopped the job during shutdown or drain |
 | `completed_at`, `expires_at` | Populated at completion, failure or cancellation; otherwise null |
 | `result` | Object containing `content_type`, integer `size_bytes`, and lowercase hexadecimal `sha256`; otherwise null |
 | `error` | Error object for failed processing; otherwise null |
@@ -169,7 +169,7 @@ Poll using `Accept: application/json`, observing `Retry-After` where present. St
 
 The result is available only in `completed` state. Queued/processing jobs return **409 `result_not_ready`**; other noncompleted states return **409 `result_unavailable`**. Downloads do not consume or delete results. Verify the full file's size and SHA-256 against `result`, commit it to durable storage, then delete the job. Partial downloads still need full-file checksum verification after assembly.
 
-`DELETE /v1/jobs/{id}` has no request body. It returns **202** with a job representation when cancellation or transfer shutdown is pending, and **204** without a body when cleanup is complete. Repeat DELETE on a retained deleted tombstone also returns 204. Expired jobs return 410; unknown or inaccessible jobs return 404. Deletion cancels active downloads. There is no automatic retry of a failed processing job; use a new idempotency key for a deliberate new attempt.
+`DELETE /v1/jobs/{id}` has no request body. A queued or processing job returns **202** and moves to `cancelling`, then to the `deleted` tombstone. A finished job returns **204** once its files are removed, or **202** if an active download pin delays removal; either way it is a `deleted` tombstone straight away. DELETE on a deleted or expired tombstone returns 204; unknown or inaccessible jobs return 404. Deletion cancels active downloads. There is no automatic retry of a failed processing job; use a new idempotency key for a deliberate new attempt.
 
 The `metadata` operation also produces a downloadable file, with `application/json` content. It contains `format`, numeric `duration_seconds`, integer `width` and `height`, boolean `still_image`, and optional `video_codec`, `audio_codec`, and `channels`. It excludes arbitrary source tags. Dimensions are orientation-adjusted; audio-only inputs have zero dimensions.
 
@@ -190,7 +190,7 @@ HTTP errors use this JSON envelope (messages are sanitized, and callers should b
 
 | HTTP status | Error codes / cause |
 |---|---|
-| 400 | `query_parameters_not_supported`, `invalid_idempotency_key`, `missing_request_part`, `malformed_request`, `missing_file_part`, `incomplete_upload`, `checksum_mismatch`, `unexpected_part` |
+| 400 | `malformed_request` (query parameters, Idempotency-Key, extra parts, upload shorter than declared), `missing_part` (`field` names `request` or `file`), `checksum_mismatch` |
 | 401 | `invalid_authentication`; includes `WWW-Authenticate: Bearer` |
 | 404 | `job_not_found`; also hides ownership differences |
 | 405 | `method_not_allowed` |
@@ -200,14 +200,14 @@ HTTP errors use this JSON envelope (messages are sanitized, and callers should b
 | 413 | `upload_too_large` (configured or declared size exceeded) |
 | 415 | `unsupported_content_type` |
 | 416 | `invalid_range` |
-| 422 | `invalid_parameter` |
+| 422 | `invalid_parameter`, `unsupported_operation`, `incompatible_output`; `field` names the offending input |
 | 429 | `consumer_limit` |
 | 500 | `internal_error` |
 | 503 | `capacity_exhausted`, `storage_unavailable`, `processor_unavailable` |
 
 429, 503 and `idempotency_in_progress` include `Retry-After: 2` and `retryable: true`. Other HTTP errors have `retryable: false`; `result_not_ready` still calls for polling the status endpoint. Retry transient failures with bounded backoff and jitter. A broken upload connection may yield no HTTP response; replay using the same idempotency key and request fingerprint.
 
-Asynchronous failures appear in `job.error` on a **200 status response**, with one of: `invalid_media`, `media_type_mismatch`, `upscale_not_allowed`, `unsupported_media`, `invalid_parameter`, `no_audio_track`, `incompatible_output`, `processing_timeout`, `output_too_large`, `processing_failed`, or `invalid_output`. These errors have `retryable: false` and omit `request_id`. The error schema reserves optional `field`; current handlers do not populate it. Raw FFmpeg diagnostics are never returned.
+Asynchronous failures appear in `job.error` on a **200 status response**, with one of the contract's codes: `invalid_media`, `unsupported_media` (including a declared Content-Type that does not match the detected format), `no_audio_track`, `incompatible_output`, `upscale_not_allowed`, `duration_exceeded`, `dimensions_exceeded`, `range_out_of_bounds`, `processing_timeout`, `output_too_large`, or `processing_failed`. `processing_timeout` and `processing_failed` are `retryable: true`; the rest are false. `field` is set for `incompatible_output`, `upscale_not_allowed` and `range_out_of_bounds`. These errors omit `request_id`. Raw FFmpeg diagnostics are never returned.
 
 ### Health and capabilities
 

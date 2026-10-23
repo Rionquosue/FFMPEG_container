@@ -20,9 +20,9 @@ type Request struct {
 	declaredMIME string
 }
 type Params struct {
-	Width, Height, Quality, Bitrate, Channels int
-	Fit                                       string
-	Timestamp, Start, Duration                float64
+	Width, Height, Quality, Bitrate, Channels, JPEGQuality int
+	Fit                                                    string
+	Timestamp, Start, Duration                             float64
 }
 
 func decodeStrict(r io.Reader, v any, max int64) error {
@@ -84,33 +84,50 @@ func decodeStrict(r io.Reader, v any, max int64) error {
 	return d.Decode(v)
 }
 
-func (r Request) Validate(c Config) (Params, error) {
-	p := Params{Quality: 23, Bitrate: 128, Channels: 2, Fit: "contain"}
-	bad := errors.New("unsupported operation, format or parameters")
-	if r.Parameters == nil {
-		return p, bad
-	}
+// invalid builds a synchronous 422 error (03, Synchronous HTTP errors).
+func invalid(code, field, message string) *APIError {
+	return &APIError{Code: code, Field: field, Message: message}
+}
+
+// Validate checks the request part before any file bytes are read. Errors
+// carry the contract's code and the offending field.
+func (r Request) Validate(c Config) (Params, *APIError) {
+	p := Params{Quality: 23, Bitrate: 128, Channels: 2, Fit: "contain", JPEGQuality: 85}
 	hash, e := hex.DecodeString(r.Input.SHA256)
-	if e != nil || len(hash) != 32 || r.Input.Size < 1 || r.Input.Size > c.MaxUpload {
-		return p, errors.New("invalid input size or checksum")
+	if e != nil || len(hash) != 32 {
+		return p, invalid("invalid_parameter", "input.sha256", "SHA-256 must be 64 hexadecimal characters.")
+	}
+	if r.Input.Size < 1 || r.Input.Size > c.MaxUpload {
+		return p, invalid("invalid_parameter", "input.size_bytes", "Input size must be between 1 byte and the advertised maximum.")
 	}
 	fields := map[string]string{
 		"transcode": "width height fit quality audio_bitrate_kbps",
-		"resize":    "width height fit", "thumbnail": "timestamp_seconds width height fit",
+		"resize":    "width height fit jpeg_quality", "thumbnail": "timestamp_seconds width height fit jpeg_quality",
 		"extract_audio": "audio_bitrate_kbps channels", "trim": "start_seconds duration_seconds quality",
 		"remux": "", "metadata": "",
 	}
 	allowed, ok := fields[r.Operation]
 	if !ok {
-		return p, bad
+		return p, invalid("unsupported_operation", "operation", "Unknown operation.")
+	}
+	formats := map[string][]string{"transcode": {"mp4", "webm"}, "resize": {"jpg", "png"}, "thumbnail": {"jpg", "png"}, "extract_audio": {"m4a", "mp3", "opus"}, "trim": {"mp4", "webm"}, "remux": {"mp4", "webm"}, "metadata": {"json"}}
+	if !contains(formats[r.Operation], r.Format) {
+		return p, invalid("incompatible_output", "output_format", "This output format is not available for the operation.")
+	}
+	if r.Parameters == nil {
+		return p, invalid("invalid_parameter", "parameters", "Parameters must be an object.")
 	}
 	set := map[string]bool{}
 	for _, f := range splitFields(allowed) {
 		set[f] = true
 	}
 	for k, v := range r.Parameters {
-		if !set[k] || bytes.Equal(v, []byte("null")) {
-			return p, bad
+		field := "parameters." + k
+		if !set[k] {
+			return p, invalid("invalid_parameter", field, "Unknown parameter for this operation.")
+		}
+		if bytes.Equal(v, []byte("null")) {
+			return p, invalid("invalid_parameter", field, "Parameter must not be null.")
 		}
 		var dest any
 		switch k {
@@ -126,6 +143,8 @@ func (r Request) Validate(c Config) (Params, error) {
 			dest = &p.Channels
 		case "fit":
 			dest = &p.Fit
+		case "jpeg_quality":
+			dest = &p.JPEGQuality
 		case "timestamp_seconds":
 			dest = &p.Timestamp
 		case "start_seconds":
@@ -134,45 +153,68 @@ func (r Request) Validate(c Config) (Params, error) {
 			dest = &p.Duration
 		}
 		if json.Unmarshal(v, dest) != nil {
-			return p, bad
+			return p, invalid("invalid_parameter", field, "Parameter has the wrong type.")
 		}
 	}
-	formats := map[string][]string{"transcode": {"mp4", "webm"}, "resize": {"jpg", "png"}, "thumbnail": {"jpg", "png"}, "extract_audio": {"m4a", "mp3", "opus"}, "trim": {"mp4", "webm"}, "remux": {"mp4", "webm"}, "metadata": {"json"}}
-	if !contains(formats[r.Operation], r.Format) {
-		return p, bad
+	switch {
+	case p.Quality < 18 || p.Quality > 35:
+		return p, invalid("invalid_parameter", "parameters.quality", "Quality must be an integer between 18 and 35.")
+	case p.Bitrate < 64 || p.Bitrate > 320:
+		return p, invalid("invalid_parameter", "parameters.audio_bitrate_kbps", "Audio bitrate must be between 64 and 320 kbps.")
+	case p.Channels < 1 || p.Channels > 2:
+		return p, invalid("invalid_parameter", "parameters.channels", "Channels must be 1 or 2.")
+	case !contains([]string{"contain", "cover"}, p.Fit):
+		return p, invalid("invalid_parameter", "parameters.fit", "Fit must be contain or cover.")
+	case p.JPEGQuality < 50 || p.JPEGQuality > 95:
+		return p, invalid("invalid_parameter", "parameters.jpeg_quality", "JPEG quality must be an integer between 50 and 95.")
 	}
-	if p.Quality < 18 || p.Quality > 35 || p.Bitrate < 64 || p.Bitrate > 320 || p.Channels < 1 || p.Channels > 2 || !contains([]string{"contain", "cover"}, p.Fit) {
-		return p, bad
+	if _, ok := r.Parameters["jpeg_quality"]; ok && r.Format != "jpg" {
+		return p, invalid("invalid_parameter", "parameters.jpeg_quality", "JPEG quality applies only to jpg output.")
 	}
 	_, wset := r.Parameters["width"]
 	_, hset := r.Parameters["height"]
 	if wset != hset {
-		return p, bad
+		missing := "parameters.height"
+		if hset {
+			missing = "parameters.width"
+		}
+		return p, invalid("invalid_parameter", missing, "Width and height must be given together.")
 	}
-	if r.Operation == "resize" || r.Operation == "thumbnail" {
-		if !wset {
-			return p, bad
+	if (r.Operation == "resize" || r.Operation == "thumbnail") && !wset {
+		return p, invalid("invalid_parameter", "parameters.width", "Width and height are required.")
+	}
+	if wset {
+		for _, d := range []struct {
+			name string
+			v    int
+		}{{"width", p.Width}, {"height", p.Height}} {
+			if d.v < 16 || d.v > 4096 || (r.Operation == "transcode" && d.v%2 != 0) {
+				return p, invalid("invalid_parameter", "parameters."+d.name, "Dimensions must be integers between 16 and 4096, even for video.")
+			}
+		}
+		if int64(p.Width)*int64(p.Height) > c.MaxPixels {
+			return p, invalid("invalid_parameter", "parameters.width", "Width × height exceeds the pixel limit.")
 		}
 	}
-	if wset && (p.Width < 16 || p.Height < 16 || p.Width > 4096 || p.Height > 4096 || int64(p.Width)*int64(p.Height) > c.MaxPixels) {
-		return p, bad
-	}
-	if r.Operation == "transcode" && (p.Width%2 != 0 || p.Height%2 != 0) {
-		return p, bad
-	}
-	for _, v := range []float64{p.Start, p.Duration, p.Timestamp} {
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > c.MaxDuration {
-			return p, bad
+	for _, t := range []struct {
+		name string
+		v    float64
+	}{{"start_seconds", p.Start}, {"duration_seconds", p.Duration}, {"timestamp_seconds", p.Timestamp}} {
+		if math.IsNaN(t.v) || math.IsInf(t.v, 0) || t.v < 0 || t.v > c.MaxDuration {
+			return p, invalid("invalid_parameter", "parameters."+t.name, "Time must be a finite number within the duration limit.")
 		}
 	}
 	if r.Operation == "thumbnail" {
 		if _, ok := r.Parameters["timestamp_seconds"]; !ok {
-			return p, bad
+			return p, invalid("invalid_parameter", "parameters.timestamp_seconds", "Timestamp is required.")
 		}
 	}
 	if r.Operation == "trim" {
-		if _, ok := r.Parameters["start_seconds"]; !ok || p.Duration <= 0 {
-			return p, bad
+		if _, ok := r.Parameters["start_seconds"]; !ok {
+			return p, invalid("invalid_parameter", "parameters.start_seconds", "Start is required.")
+		}
+		if p.Duration <= 0 {
+			return p, invalid("invalid_parameter", "parameters.duration_seconds", "Duration must be greater than zero.")
 		}
 	}
 	return p, nil

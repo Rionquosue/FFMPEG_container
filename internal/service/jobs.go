@@ -226,7 +226,10 @@ func (s *Service) execute(ctx context.Context, j *job) {
 	j.view.Completed = &now
 	j.view.Expires = &exp
 	if ctx.Err() != nil && j.view.Status == "cancelling" {
-		j.view.Status = "cancelled"
+		// A client DELETE always ends in deleted (03, Lifecycle).
+		j.view.Status = "deleted"
+		j.view.Expires = nil
+		j.tombstone = now.Add(s.cfg.TombstoneTTL)
 		s.release(j)
 		return
 	}

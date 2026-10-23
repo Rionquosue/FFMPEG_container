@@ -26,6 +26,13 @@ type MediaProcessor struct {
 	Config  Config
 	Execute Execute
 }
+
+// Probe failures that map to their own asynchronous error codes (03).
+var (
+	errDuration   = errors.New("duration limit")
+	errDimensions = errors.New("pixel limit")
+)
+
 type probeData struct {
 	Streams []struct {
 		Type     string `json:"codec_type"`
@@ -71,13 +78,13 @@ func (p *MediaProcessor) probe(ctx context.Context, dir, file string) (metadata,
 	if raw.Format.Duration != "" && raw.Format.Duration != "N/A" {
 		out.Duration, e = strconv.ParseFloat(raw.Format.Duration, 64)
 		if e != nil || math.IsInf(out.Duration, 0) || math.IsNaN(out.Duration) || out.Duration < 0 || out.Duration > p.Config.MaxDuration {
-			return out, errors.New("duration limit")
+			return out, errDuration
 		}
 	}
 	for _, s := range raw.Streams {
 		if s.Type == "video" {
 			if s.Width < 1 || s.Height < 1 || int64(s.Width)*int64(s.Height) > p.Config.MaxPixels {
-				return out, errors.New("pixel limit")
+				return out, errDimensions
 			}
 			if out.VideoCodec == "" {
 				out.VideoCodec = s.Codec
@@ -106,8 +113,26 @@ func (p *MediaProcessor) probe(ctx context.Context, dir, file string) (metadata,
 	}
 	return out, nil
 }
+
+// Asynchronous error codes the contract marks as retryable (03, Asynchronous job errors).
+var retryableFaults = map[string]bool{"processing_timeout": true, "resource_limit": true, "processing_failed": true}
+
 func fault(code string) *APIError {
-	return &APIError{Code: code, Message: strings.ReplaceAll(code, "_", " ") + "."}
+	return &APIError{Code: code, Message: strings.ReplaceAll(code, "_", " ") + ".", Retryable: retryableFaults[code]}
+}
+func faultAt(code, field string) *APIError {
+	f := fault(code)
+	f.Field = field
+	return f
+}
+func probeFault(e error) *APIError {
+	switch {
+	case errors.Is(e, errDuration):
+		return fault("duration_exceeded")
+	case errors.Is(e, errDimensions):
+		return fault("dimensions_exceeded")
+	}
+	return fault("invalid_media")
 }
 func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v Params) (*Result, *APIError) {
 	input := filepath.Join(dir, "input")
@@ -122,7 +147,7 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 		if ctx.Err() != nil {
 			return nil, fault("processing_timeout")
 		}
-		return nil, fault("invalid_media")
+		return nil, probeFault(e)
 	}
 	if claimed := r.declaredMIME; claimed != "" && claimed != "application/octet-stream" {
 		allowed := map[string][]string{
@@ -133,7 +158,8 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 			"flac": {"audio/flac", "audio/x-flac"}, "ogg": {"audio/ogg", "video/ogg", "application/ogg"}, "aac": {"audio/aac"},
 		}
 		if !contains(allowed[m.Format], claimed) {
-			return nil, fault("media_type_mismatch")
+			// The declared type does not match the detected format.
+			return nil, fault("unsupported_media")
 		}
 	}
 	if v.Width > 0 {
@@ -142,7 +168,7 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 			scale = math.Max(float64(v.Width)/float64(m.Width), float64(v.Height)/float64(m.Height))
 		}
 		if m.Width == 0 || scale > 1 {
-			return nil, fault("upscale_not_allowed")
+			return nil, faultAt("upscale_not_allowed", "parameters.width")
 		}
 	}
 	if r.Operation == "resize" && !m.Image {
@@ -152,10 +178,13 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 		return nil, fault("unsupported_media")
 	}
 	if r.Operation == "thumbnail" && v.Timestamp >= m.Duration {
-		return nil, fault("invalid_parameter")
+		return nil, faultAt("range_out_of_bounds", "parameters.timestamp_seconds")
+	}
+	if r.Operation == "trim" && v.Start >= m.Duration {
+		return nil, faultAt("range_out_of_bounds", "parameters.start_seconds")
 	}
 	if r.Operation == "trim" && v.Start+v.Duration > m.Duration {
-		return nil, fault("invalid_parameter")
+		return nil, faultAt("range_out_of_bounds", "parameters.duration_seconds")
 	}
 	if r.Operation == "extract_audio" && m.AudioCodec == "" {
 		return nil, fault("no_audio_track")
@@ -163,7 +192,7 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 	if r.Operation == "remux" {
 		compatible := r.Format == "mp4" && m.VideoCodec == "h264" && (m.AudioCodec == "" || m.AudioCodec == "aac") || r.Format == "webm" && contains([]string{"vp8", "vp9", "av1"}, m.VideoCodec) && (m.AudioCodec == "" || contains([]string{"opus", "vorbis"}, m.AudioCodec))
 		if !compatible {
-			return nil, fault("incompatible_output")
+			return nil, faultAt("incompatible_output", "output_format")
 		}
 	}
 	if r.Operation == "metadata" {
@@ -191,7 +220,7 @@ func (p *MediaProcessor) Process(ctx context.Context, dir string, r Request, v P
 			if ctx.Err() != nil {
 				return nil, fault("processing_timeout")
 			}
-			return nil, fault("invalid_output")
+			return nil, fault("processing_failed")
 		}
 	}
 	stream, e := os.Open(output)
@@ -238,7 +267,7 @@ func buildArgs(input, output string, r Request, p Params, m metadata, c Config) 
 	case "resize", "thumbnail":
 		args = append(args, "-map", "0:v:0", "-frames:v", "1", "-an")
 		if r.Format == "jpg" {
-			args = append(args, "-c:v", "mjpeg", "-q:v", "2")
+			args = append(args, "-c:v", "mjpeg", "-q:v", strconv.Itoa(jpegQScale(p.JPEGQuality)))
 		} else {
 			args = append(args, "-c:v", "png")
 		}
@@ -318,4 +347,10 @@ func Sandboxed(c Config) Execute {
 		pre := []string{"--job", dir, strconv.FormatInt(c.MaxOutput, 10), strconv.Itoa(int(c.ProcessTimeout.Seconds()) + 1), tool}
 		return RunProcess(ctx, c.Sandbox, append(pre, args...), dir)
 	}
+}
+
+// jpegQScale maps jpeg_quality 50–95 onto the MJPEG quantizer scale 31–2
+// (lower is better quality and a larger file).
+func jpegQScale(quality int) int {
+	return 2 + int(math.Round(float64(95-quality)*29/45))
 }

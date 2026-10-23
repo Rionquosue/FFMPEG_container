@@ -257,11 +257,84 @@ func TestCancellationAndCapacity(t *testing.T) {
 	if w = call(s, "DELETE", b.StatusURL, testKey); w.Code != 202 {
 		t.Fatal(w.Code)
 	}
-	waitState(t, s, b.ID, "cancelled")
+	waitDeleted(t, s, b.StatusURL)
 	if w = call(s, "DELETE", a.StatusURL, testKey); w.Code != 202 {
 		t.Fatal(w.Code)
 	}
-	waitState(t, s, a.ID, "cancelled")
+	waitDeleted(t, s, a.StatusURL)
+	// A client DELETE ends in deleted, never cancelled, and stays idempotent.
+	if w = call(s, "DELETE", a.StatusURL, testKey); w.Code != 204 {
+		t.Fatal(w.Code)
+	}
+}
+
+// waitDeleted waits until GET reports the job_deleted tombstone.
+func waitDeleted(t *testing.T, s *Service, url string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w := call(s, "GET", url, testKey)
+		if w.Code == 410 && strings.Contains(w.Body.String(), `"job_deleted"`) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("not deleted: %s", call(s, "GET", url, testKey).Body.String())
+}
+
+func TestDeleteExpiredTombstoneIsNoContent(t *testing.T) {
+	s := setup(t, fakeProcessor{})
+	v := submit(t, s, []byte("abc"), "idempotency-000001")
+	waitState(t, s, v.ID, "completed")
+	s.sweep(time.Now().Add(s.cfg.TTL + time.Second))
+	if w := call(s, "DELETE", v.StatusURL, testKey); w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestReplayVerifiesChecksum(t *testing.T) {
+	s := setup(t, fakeProcessor{})
+	data := []byte("abc")
+	v := submit(t, s, data, "idempotency-000001")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, uploadRequest(t, request(data), []byte("xyz"), "idempotency-000001"))
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"checksum_mismatch"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if again := submit(t, s, data, "idempotency-000001"); again.ID != v.ID {
+		t.Fatal("replay created a new job")
+	}
+}
+
+func TestValidationErrorCodesAndFields(t *testing.T) {
+	c := DefaultConfig()
+	sha := request([]byte("abc")).Input.SHA256
+	body := func(op, params, format string) string {
+		return `{"operation":"` + op + `","input":{"size_bytes":3,"sha256":"` + sha + `"},"parameters":` + params + `,"output_format":"` + format + `"}`
+	}
+	cases := []struct{ input, code, field string }{
+		{body("sharpen", `{}`, "png"), "unsupported_operation", "operation"},
+		{body("resize", `{"width":32,"height":32}`, "mp4"), "incompatible_output", "output_format"},
+		{body("resize", `{"width":32,"height":32,"jpeg_quality":80}`, "png"), "invalid_parameter", "parameters.jpeg_quality"},
+		{body("thumbnail", `{"width":32,"height":32,"timestamp_seconds":1,"jpeg_quality":96}`, "jpg"), "invalid_parameter", "parameters.jpeg_quality"},
+		{body("transcode", `{"width":33,"height":32}`, "mp4"), "invalid_parameter", "parameters.width"},
+		{body("metadata", `{"command":"x"}`, "json"), "invalid_parameter", "parameters.command"},
+	}
+	for _, tc := range cases {
+		var req Request
+		if e := decodeStrict(strings.NewReader(tc.input), &req, 16384); e != nil {
+			t.Fatal(e)
+		}
+		_, verr := req.Validate(c)
+		if verr == nil || verr.Code != tc.code || verr.Field != tc.field {
+			t.Fatalf("%s: got %+v", tc.input, verr)
+		}
+	}
+	var ok Request
+	_ = decodeStrict(strings.NewReader(body("resize", `{"width":32,"height":32,"jpeg_quality":70}`, "jpg")), &ok, 16384)
+	if p, verr := ok.Validate(c); verr != nil || p.JPEGQuality != 70 {
+		t.Fatal(verr, p.JPEGQuality)
+	}
 }
 func TestStatusRepresentationsAndETag(t *testing.T) {
 	s := setup(t, fakeProcessor{fail: true})
@@ -348,7 +421,7 @@ func TestValidation(t *testing.T) {
 	} {
 		var req Request
 		if e := decodeStrict(strings.NewReader(input), &req, 16384); e == nil {
-			if _, e = req.Validate(c); e == nil {
+			if _, verr := req.Validate(c); verr == nil {
 				t.Fatal("accepted invalid input")
 			}
 		}

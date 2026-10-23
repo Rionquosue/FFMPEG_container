@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,18 @@ func fail(w http.ResponseWriter, status int, code string) {
 	}
 	writeJSON(w, status, map[string]any{"error": APIError{Code: code, Message: strings.ReplaceAll(code, "_", " ") + ".", Retryable: status == 429 || status == 503 || code == "idempotency_in_progress", RequestID: w.Header().Get("X-Request-ID")}})
 }
+
+// failWith writes a synchronous error carrying a field and message (03, Error model).
+func failWith(w http.ResponseWriter, status int, e *APIError) {
+	retry := status == 429 || status == 503 || e.Code == "idempotency_in_progress"
+	if retry {
+		w.Header().Set("Retry-After", "2")
+	}
+	out := *e
+	out.Retryable = retry
+	out.RequestID = w.Header().Get("X-Request-ID")
+	writeJSON(w, status, map[string]any{"error": out})
+}
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", newID())
 	w.Header().Set("Cache-Control", "no-store")
@@ -36,7 +49,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if r.URL.RawQuery != "" {
-		fail(w, 400, "query_parameters_not_supported")
+		failWith(w, 400, &APIError{Code: "malformed_request", Message: "Query parameters are not supported."})
 		return
 	}
 	if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" {
@@ -126,13 +139,14 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 	_ = rc.SetReadDeadline(time.Now().Add(s.cfg.UploadTimeout))
 	defer rc.SetReadDeadline(time.Time{})
 	key := r.Header.Get("Idempotency-Key")
+	badKey := &APIError{Code: "malformed_request", Field: "Idempotency-Key", Message: "Idempotency-Key must be 16 to 128 printable ASCII characters."}
 	if len(key) < 16 || len(key) > 128 {
-		fail(w, 400, "invalid_idempotency_key")
+		failWith(w, 400, badKey)
 		return
 	}
 	for _, ch := range key {
 		if ch < 33 || ch > 126 {
-			fail(w, 400, "invalid_idempotency_key")
+			failWith(w, 400, badKey)
 			return
 		}
 	}
@@ -145,7 +159,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 	}
 	part, e := mr.NextPart()
 	if e != nil || part.FormName() != "request" || part.FileName() != "" {
-		fail(w, 400, "missing_request_part")
+		failWith(w, 400, &APIError{Code: "missing_part", Field: "request", Message: "The first part must be the request JSON."})
 		return
 	}
 	mt, _, e := mime.ParseMediaType(part.Header.Get("Content-Type"))
@@ -158,12 +172,12 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 		fail(w, 400, "malformed_request")
 		return
 	}
-	params, e := req.Validate(s.cfg)
-	if e != nil {
+	params, invalidErr := req.Validate(s.cfg)
+	if invalidErr != nil {
 		if req.Input.Size > s.cfg.MaxUpload {
-			fail(w, 413, "upload_too_large")
+			failWith(w, 413, &APIError{Code: "upload_too_large", Field: "input.size_bytes", Message: "The declared size exceeds the upload limit."})
 		} else {
-			fail(w, 422, "invalid_parameter")
+			failWith(w, 422, invalidErr)
 		}
 		return
 	}
@@ -171,6 +185,12 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 	j, code, msg := s.reserve(owner, key, req, params)
 	if code != 0 {
 		if code == 202 {
+			// Replay of an accepted request: hash the file part without
+			// storing it and confirm it matches the declaration (03, Idempotency).
+			if apiErr := verifyReplay(mr, req.Input.Size, req.Input.SHA256); apiErr != nil {
+				failWith(w, 400, apiErr)
+				return
+			}
 			s.mu.Lock()
 			v := j.view
 			s.mu.Unlock()
@@ -189,7 +209,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 	}()
 	part, e = mr.NextPart()
 	if e != nil || part.FormName() != "file" || len(part.FileName()) > 255 {
-		fail(w, 400, "missing_file_part")
+		failWith(w, 400, &APIError{Code: "missing_part", Field: "file", Message: "The second part must be the file."})
 		return
 	}
 	if value := part.Header.Get("Content-Type"); value != "" {
@@ -213,7 +233,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 		return
 	}
 	if e != nil || ce != nil || n != req.Input.Size {
-		fail(w, 400, "incomplete_upload")
+		failWith(w, 400, &APIError{Code: "malformed_request", Field: "input.size_bytes", Message: "The upload ended before the declared size."})
 		return
 	}
 	if hex.EncodeToString(h.Sum(nil)) != req.Input.SHA256 {
@@ -221,7 +241,7 @@ func (s *Service) upload(w http.ResponseWriter, r *http.Request, owner string) {
 		return
 	}
 	if _, e = mr.NextPart(); e != io.EOF {
-		fail(w, 400, "unexpected_part")
+		failWith(w, 400, &APIError{Code: "malformed_request", Message: "Exactly two parts are allowed."})
 		return
 	}
 	if r.Context().Err() != nil {
@@ -323,7 +343,7 @@ func (s *Service) remove(w http.ResponseWriter, r *http.Request, owner, id strin
 	defer s.mu.Unlock()
 	j, code, msg := s.lookup(owner, id)
 	if code != 0 {
-		if j != nil && j.view.Status == "deleted" {
+		if j != nil && (j.view.Status == "deleted" || j.view.Status == "expired") {
 			w.WriteHeader(204)
 		} else {
 			fail(w, code, msg)
@@ -339,17 +359,17 @@ func (s *Service) remove(w http.ResponseWriter, r *http.Request, owner, id strin
 		writeJSON(w, 202, j.view)
 		return
 	}
-	if len(j.downloads) > 0 {
-		w.Header().Set("Retry-After", "2")
-		j.view.Status = "deleting"
-		writeJSON(w, 202, j.view)
-		return
-	}
-	s.release(j)
+	pinned := len(j.downloads) > 0
 	j.view.Status = "deleted"
 	j.view.DownloadURL = nil
 	j.view.Result = nil
 	j.tombstone = time.Now().Add(s.cfg.TombstoneTTL)
+	if pinned {
+		// Files are removed once the cancelled download releases its pin.
+		w.WriteHeader(202)
+		return
+	}
+	s.release(j)
 	w.WriteHeader(204)
 }
 
@@ -398,12 +418,8 @@ func (s *Service) download(w http.ResponseWriter, r *http.Request, owner, id str
 		f.Close()
 		s.mu.Lock()
 		delete(j.downloads, pin)
-		if len(j.downloads) == 0 && (j.view.Status == "expired" || j.view.Status == "deleting" || s.closing) {
+		if len(j.downloads) == 0 && (j.view.Status == "expired" || j.view.Status == "deleted" || s.closing) {
 			s.release(j)
-			if j.view.Status == "deleting" {
-				j.view.Status = "deleted"
-				j.tombstone = time.Now().Add(s.cfg.TombstoneTTL)
-			}
 		}
 		s.mu.Unlock()
 	}()
@@ -461,3 +477,20 @@ func (c *cancelReader) Read(p []byte) (int, error) {
 	return c.f.Read(p)
 }
 func (c *cancelReader) Seek(o int64, w int) (int64, error) { return c.f.Seek(o, w) }
+
+// verifyReplay reads a replayed file part into a hash only, never to disk.
+func verifyReplay(mr *multipart.Reader, size int64, sha string) *APIError {
+	part, e := mr.NextPart()
+	if e != nil || part.FormName() != "file" {
+		return &APIError{Code: "missing_part", Field: "file", Message: "The second part must be the file."}
+	}
+	h := sha256.New()
+	n, e := io.Copy(h, io.LimitReader(part, size+1))
+	if e != nil || n != size || hex.EncodeToString(h.Sum(nil)) != sha {
+		return &APIError{Code: "checksum_mismatch", Field: "input.sha256", Message: "The replayed file does not match the declared checksum."}
+	}
+	if _, e = mr.NextPart(); e != io.EOF {
+		return &APIError{Code: "malformed_request", Message: "Exactly two parts are allowed."}
+	}
+	return nil
+}
